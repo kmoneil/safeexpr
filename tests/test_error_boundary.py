@@ -8,8 +8,6 @@ tests pin the mechanism rather than the wording, so a future refactor that reint
 
 from __future__ import annotations
 
-import sys
-
 import pytest
 
 from safeexpr._errors import (
@@ -98,7 +96,6 @@ class TestTheF9LeakIsClosed:
         # the caller's data.
         assert "AttributeError" in text
 
-    @pytest.mark.skipif(sys.version_info < (3, 11), reason="add_note is 3.11+")
     def test_notes_are_not_carried_across(self) -> None:
         """`__notes__` is a writable channel on the causing exception, so it is a way for a
         caller's object to attach a string to an error we then hand back."""
