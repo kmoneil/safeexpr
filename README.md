@@ -11,9 +11,20 @@ orders | where(_.status == "paid") | group_by(_.customer_id)
 
 ## Status
 
-**Alpha, and not yet usable.** The scaffold is in place; the evaluator is not. Nothing in this
-package evaluates an expression today, and the `CHANGELOG.md` "Known limitations" section is kept
-current with exactly what does and does not exist.
+**Alpha.** The evaluator works for comparison, arithmetic, field access and indexing:
+
+```python
+from safeexpr import evaluate
+
+evaluate(
+    'user.plan == "pro" and user.region in ["us", "eu"]', {"user": {"plan": "pro", "region": "eu"}}
+)
+# True
+```
+
+Pipes, lazy arguments and the function registry are not built yet, so the `|` examples above do
+not work today. The `CHANGELOG.md` "Known limitations" section is kept current with exactly what
+does and does not exist.
 
 The `Development Status :: 3 - Alpha` classifier stays until the escape corpus ships and passes
 on every supported interpreter, because that corpus is the security claim.

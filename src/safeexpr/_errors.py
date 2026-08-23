@@ -109,6 +109,15 @@ class ValidationError(SafeExprError):
     """
 
 
+class EvaluationError(SafeExprError):
+    """The expression was valid but could not be evaluated.
+
+    An undefined name, a missing field, a type mismatch, a division by zero, or a result too
+    large to compute. These are the user's mistakes rather than the language's limits, and the
+    message says which one.
+    """
+
+
 class InternalError(SafeExprError):
     """Something raised that this package did not anticipate.
 
