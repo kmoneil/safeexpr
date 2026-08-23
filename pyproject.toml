@@ -1,0 +1,236 @@
+[project]
+name = "safeexpr"
+# Single-sourced from the package, so `safeexpr.__version__` and the installed distribution
+# cannot name different releases in the same bug report. See `[tool.hatch.version]` below and
+# `tests/test_packaging.py`, which asserts they agree.
+dynamic = ["version"]
+description = "A safe expression language for Python. Pipes, data functions, dot access, zero dependencies."
+readme = "README.md"
+# **3.10, and the usual argument for it does not apply here.**
+#
+# The obvious reason to pick a floor for an `ast`-based project is that the node classes move
+# between versions. They do not, for anything this package parses. The parsed tree for the entire
+# supported grammar was diffed across 3.9, 3.10, 3.12, 3.13 and 3.14 and is identical on all five
+# measured directly. In particular `a[1]`, `a["k"]`, `a[1:2]` and `a[1,2]`
+# already produce `Subscript(slice=Constant|Slice|Tuple)` at 3.9, so `ast.Index` and
+# `ast.ExtSlice` never reach the transformer and it needs no version-conditional code at all.
+#
+# So the floor is a support-lifecycle decision rather than a technical one:
+#
+#   - 3.9 reached end of life in October 2025. A security package that installs on an
+#     interpreter receiving no security fixes is advertising a boundary it cannot hold up.
+#   - asteval, RestrictedPython and cel-python all already require >=3.10, so matching them
+#     costs no reach against the libraries we are measured against.
+#
+# Two consequences worth writing down because they are easy to rediscover the hard way:
+#
+#   - `AttributeError.obj` exists from 3.10 on. It carries a *live reference* to the object an
+#     attribute access failed on, which is the F9 leak (RestrictedPython CVE-2024-47532), so the
+#     error boundary has to scrub unconditionally rather than behind a version check.
+#   - Atomic groups `(?>...)` and possessive quantifiers are 3.11+, verified absent on 3.9 and
+#     3.10. They therefore cannot be the ReDoS mitigation at this floor, which is why the
+#     `matches()` gate is a static pattern check instead.
+requires-python = ">=3.10"
+license = "Apache-2.0"
+# The SPDX expression alone puts `License-Expression: Apache-2.0` in METADATA and ships no grant
+# text at all. Apache-2.0 section 4(a) requires the copy to travel with the distribution, and a
+# corporate compliance scan looks for the file, not the identifier.
+license-files = ["LICENSE"]
+authors = [{ name = "Kevin O'Neil", email = "kevin@oneil.xyz" }]
+keywords = ["expression", "sandbox", "security", "rules-engine", "feature-flags", "ast"]
+classifiers = [
+  # Alpha until the escape corpus exists and passes. The central claim of this package is that a
+  # named list of published sandbox escapes is structurally unreachable here; until `corpus/`
+  # ships an entry per failure class and the matrix runs them, that claim is unproven and no
+  # higher classifier is honest. Stated here, in README "Status" and in SECURITY.md's support
+  # window, so all three move together.
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Security",
+  "Topic :: Software Development :: Interpreters",
+  "Typing :: Typed",
+]
+# **Empty, and that is the product.** The pitch is that a reviewer reading a dependency list sees
+# one pure-Python wheel, so this list being empty is the feature rather than an implementation
+# detail.
+#
+# Asserted three ways, because a comment decays and a test does not: `tests/test_zero_deps.py`
+# reads the installed metadata, `scripts/check_zero_deps.py` imports a *built wheel* in an
+# interpreter created with `--no-project`, and the `zero-deps` CI lane runs the second one. The
+# metadata check alone would not catch a module that grew an import of something happening to be
+# present in the development environment.
+dependencies = []
+
+# Additive capability only. No core function may require an extra to work: `[dates]` upgrades
+# date parsing from ISO-8601 to natural language, and `[unicode]` upgrades slugify from ASCII to
+# transliterating. Both are declared empty until the functions that use them exist, so that
+# `pip install safeexpr[dates]` resolves rather than erroring in the window before then.
+[project.optional-dependencies]
+dates = []
+unicode = []
+
+[project.urls]
+Homepage = "https://github.com/safeexpr/safeexpr"
+Source = "https://github.com/safeexpr/safeexpr"
+Issues = "https://github.com/safeexpr/safeexpr/issues"
+Changelog = "https://github.com/safeexpr/safeexpr/blob/main/CHANGELOG.md"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/safeexpr/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/safeexpr"]
+
+# What the source distribution carries, decided rather than defaulted. Hatchling's default is
+# "everything git does not ignore", which measures out as the whole working tree.
+#
+# An allowlist rather than an exclude list, which is the opposite of the choice a project with a
+# large tree usually makes, and it is deliberate for the same reason the evaluator is an
+# allowlist: what is not named does not ship, so a new top-level directory cannot arrive in a
+# user's download by default.
+#
+# `tests/` and `corpus/` stay in, for downstream packagers. Debian, Fedora and conda-forge
+# rebuild from the sdist and run the suite to validate the build, and for this package that
+# matters more than usual: **the corpus is the security argument**, and a distribution shipping
+# the code without the tests that prove it is shipping an unverifiable claim.
+#
+[tool.hatch.build.targets.sdist]
+include = [
+  "/src",
+  "/tests",
+  "/corpus",
+  "/scripts",
+  "/README.md",
+  "/CHANGELOG.md",
+  "/SECURITY.md",
+  "/LICENSE",
+  "/pyproject.toml",
+]
+
+[dependency-groups]
+# `build` exists so the build backend comes out of `uv.lock` like everything else.
+#
+# `[build-system] requires` is the one dependency declaration in this file that `uv.lock` does
+# not cover: PEP 517 build requirements are resolved fresh, from PyPI, in an isolated environment
+# every time anything builds this project. That makes the code producing the artifact users
+# install the last unpinned thing in the release path. It has to agree with `[build-system]`
+# above, and `tests/test_packaging.py` asserts that rather than trusting it.
+build = ["hatchling>=1.27"]
+dev = [
+  "pytest>=8.3",
+  "hypothesis>=6.112",
+  "ruff>=0.14",
+  "mypy>=1.13",
+]
+
+# The lock resolves for the development interpreter rather than the floor. The floor is a promise
+# about `src/`, not about the toolchain, and dragging pytest and mypy back to what 3.10 supports
+# would freeze the development environment to serve a claim the `compat` lane already checks by
+# building its own environment per interpreter.
+[tool.uv]
+environments = ["python_version >= '3.13'"]
+
+# ---------------------------------------------------------------------------
+# ruff
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+# **Explicit, rather than relying on `.gitignore`.** Ruff honours ignore files only inside a git
+# repository, so a checkout where `git init` has not run scans `.uv-cache/` and reports tens of
+# thousands of findings in somebody else's code, which makes the gate useless before it has said
+# anything about ours.
+extend-exclude = [".uv-cache", ".venv-compat", "_tmp"]
+# **The floor, not the development interpreter.** This is what stops 3.11+ syntax reaching
+# `src/`, and it is the only gate that can: mypy's `python_version` checks semantics, not syntax.
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+  "E", "W",     # pycodestyle
+  "F",          # pyflakes
+  "I",          # isort
+  "N",          # pep8-naming
+  "UP",         # pyupgrade
+  "B",          # bugbear
+  "A",          # builtins shadowing
+  "C4",         # comprehensions
+  "C90",        # mccabe
+  "T20",        # no print in shipped code
+  "PT",         # pytest style
+  "RET",        # return simplification
+  "SIM",        # simplify
+  "SLF",        # private member access
+  "TID",        # tidy imports
+  "PTH",        # pathlib over os.path
+  "ERA",        # commented-out code
+  "PL",         # pylint
+  "TRY",        # exception antipatterns
+  "RUF",
+  "S",          # bandit
+  "D",          # pydocstyle, Google convention
+  "ANN",        # annotations required
+]
+ignore = [
+  "D105",    # magic method docstrings
+  "D107",    # __init__ docstring, documented on the class
+  "TRY003",  # long messages outside exception class: our errors carry the user's source
+]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "parents"
+
+[tool.ruff.lint.per-file-ignores]
+# Tests and scripts are exempt from docstring and annotation gates and from bandit's assert rule.
+# They are NOT exempt from correctness lints.
+#
+# `scripts/` inverts T20: printing the lane table *is* what the runner does, so "no print" there
+# would be a rule against the program.
+"scripts/**" = ["T20", "S603"]
+"tests/**" = ["D", "ANN", "S101", "S603", "S607", "PLR2004", "T20"]
+
+# ---------------------------------------------------------------------------
+# mypy, scoped to shipped code
+# ---------------------------------------------------------------------------
+[tool.mypy]
+strict = true
+files = ["src"]
+# The floor rather than the development interpreter, so the type gate checks the semantics a
+# 3.10 user gets. Syntax is ruff's `target-version` above; these two are not interchangeable.
+python_version = "3.10"
+warn_unreachable = true
+enable_error_code = [
+  "redundant-expr",
+  "truthy-bool",
+  "ignore-without-code",
+  "explicit-override",
+  "deprecated",
+]
+
+# ---------------------------------------------------------------------------
+# pytest
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Setting norecursedirs REPLACES pytest's defaults rather than extending them, so the defaults
+# are restated here. Dropping `.*` makes hypothesis warn that `.hypothesis` is being collected.
+norecursedirs = ["*.egg", ".*", "build", "dist", "_tmp", "node_modules"]
+addopts = "-ra --strict-markers --strict-config"
+xfail_strict = true
+filterwarnings = ["error"]
