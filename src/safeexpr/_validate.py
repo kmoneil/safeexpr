@@ -29,6 +29,8 @@ from __future__ import annotations
 
 import ast
 import re
+from collections.abc import Callable
+from typing import Any
 
 from ._errors import ValidationError
 
@@ -40,6 +42,21 @@ from ._errors import ValidationError
 # leak in the prototype that preceded this design) and what stops `__class__` arriving as a bare
 # name rather than as an attribute.
 _LAZY_NAME = re.compile(r"^_\d*$")
+
+# **How deeply an expression may nest.** Measured: the evaluator walks the tree recursively and
+# gives out between 497 and 498 nested operators at the default recursion limit of 1000, and the
+# source cap allows 1023. Without this, a legal 2 KB expression reported
+# "internal error ... this is a bug in safeexpr, please report it", which is the wrong answer to
+# input that is merely too deep.
+#
+# 100 rather than 400. The available depth is not ours alone: it depends on how deep the host's
+# own stack already is when it calls us, so a limit set near the measured ceiling would hold on a
+# bare call and fail from inside a framework. For scale, the deepest canonical use case nests
+# about 10, so 100 is roughly 10x anything realistic while leaving 4x headroom against a shallow
+# caller's ceiling.
+#
+# Provisional: the empirical limits work owns the final value.
+MAX_EXPRESSION_DEPTH = 100
 
 # Operators the language has. `|` is here because it carries the pipe; ordinary bitwise algebra
 # is not a goal, so `&`, `^`, `<<`, `>>` and `@` are absent and `~` is absent from the unary set.
@@ -265,6 +282,29 @@ def _check_dict(node: ast.Dict, source: str) -> ValidationError | None:
     return None
 
 
+# Node type to the extra rule that applies to it, beyond being on the allowlist. A dispatch table
+# rather than a chain of `isinstance`, so adding a rule is one line next to the others.
+_CHECKS: dict[type[ast.AST], Callable[[Any, str], ValidationError | None]] = {
+    ast.Name: _check_name,
+    ast.Attribute: _check_attribute,
+    ast.Subscript: _check_subscript,
+    ast.Call: _check_call,
+    ast.Dict: _check_dict,
+}
+
+
+def _problem_with(node: ast.AST, source: str, anchor: ast.AST | None) -> ValidationError | None:
+    """Return what is wrong with one node, or `None` if nothing is.
+
+    The allowlist check comes first: a node type that is not permitted is not worth inspecting
+    further, and reporting "not supported" beats reporting something about its contents.
+    """
+    if type(node) not in _ALLOWED_NODES:
+        return _reject(node, source, _describe(node), anchor)
+    check = _CHECKS.get(type(node))
+    return None if check is None else check(node, source)
+
+
 def validate(tree: ast.Expression, source: str = "") -> ast.Expression:
     """Check every node against the allowlist, returning the same tree.
 
@@ -291,30 +331,28 @@ def validate(tree: ast.Expression, source: str = "") -> ast.Expression:
     #
     # Each entry carries the nearest positioned ancestor, so an unpositioned node can still be
     # pointed at somewhere real.
-    stack: list[tuple[ast.AST, ast.AST | None]] = [(tree, None)]
+    deepest = 0
+    stack: list[tuple[ast.AST, ast.AST | None, int]] = [(tree, None, 0)]
     while stack:
-        node, ancestor = stack.pop()
+        node, ancestor, depth = stack.pop()
+        deepest = max(deepest, depth)
         own = hasattr(node, "lineno")
         anchor = node if own else ancestor
 
-        problem: ValidationError | None = None
-        if type(node) not in _ALLOWED_NODES:
-            problem = _reject(node, source, _describe(node), anchor)
-        elif isinstance(node, ast.Name):
-            problem = _check_name(node, source)
-        elif isinstance(node, ast.Attribute):
-            problem = _check_attribute(node, source)
-        elif isinstance(node, ast.Subscript):
-            problem = _check_subscript(node, source)
-        elif isinstance(node, ast.Call):
-            problem = _check_call(node, source)
-        elif isinstance(node, ast.Dict):
-            problem = _check_dict(node, source)
-
+        problem = _problem_with(node, source, anchor)
         if problem is not None:
             problems.append((problem, own))
 
-        stack.extend((child, anchor) for child in ast.iter_child_nodes(node))
+        stack.extend((child, anchor, depth + 1) for child in ast.iter_child_nodes(node))
+
+    if deepest > MAX_EXPRESSION_DEPTH:
+        # Reported before any other problem: an expression this deep is unusable whatever else is
+        # wrong with it, and the alternative was a RecursionError from the evaluator dressed up as
+        # an internal bug report.
+        raise ValidationError(
+            f"expression nests {deepest} levels deep, over the limit of {MAX_EXPRESSION_DEPTH}",
+            source=source,
+        )
 
     if problems:
         # Report the earliest problem in source order. A stack-based walk finds them in an order

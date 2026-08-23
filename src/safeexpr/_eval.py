@@ -36,6 +36,7 @@ from typing import Any, ClassVar
 
 from ._errors import EvaluationError, SafeExprError, contained
 from ._parse import parse
+from ._pipes import transform
 from ._registry import Function, as_function
 from ._validate import validate
 
@@ -54,6 +55,16 @@ from ._validate import validate
 # Provisional: the limits work sets every default empirically, and this one is derived from the
 # measurements above rather than from a benchmark of real expressions.
 MAX_POWER_RESULT_BITS = 8_388_608
+
+# Always available, whatever registry a host supplies.
+#
+# `bitor` exists because `|` was borrowed for the pipe. Once a name is in the registry, `x | name`
+# means "call it", so an author who genuinely wants bitwise-or on a value that shares a registry
+# name needs a way to say so. It is a builtin rather than a registry entry because the rule that
+# creates the need for it is always in force.
+_BUILTINS: dict[str, Function] = {
+    "bitor": Function("bitor", lambda a, b: a | b),
+}
 
 _BINOPS: dict[type[ast.operator], Callable[[Any, Any], Any]] = {
     ast.Add: operator.add,
@@ -208,7 +219,8 @@ class Evaluator:
         attribute_types: Mapping[type, frozenset[str]] | None = None,
     ) -> None:
         self._registry: dict[str, Function] = {
-            name: as_function(name, entry) for name, entry in (registry or {}).items()
+            **_BUILTINS,
+            **{name: as_function(name, entry) for name, entry in (registry or {}).items()},
         }
         self._attribute_types: dict[type, frozenset[str]] = dict(attribute_types or {})
 
@@ -233,7 +245,13 @@ class Evaluator:
             SafeExprError: For every failure. Nothing else escapes, which is what `contained`
                 is for.
         """
-        tree = validate(parse(source), source)
+        # Parse, rewrite pipes, validate, evaluate. The transform runs **before** validation so
+        # that the tree which is validated is the tree which is evaluated, with no window between
+        # the check and the use. It can only ever produce a call to a name already in the
+        # registry, using subtrees that were already there, so it cannot launder anything past the
+        # allowlist; and it preserves positions, so errors still point at what the user wrote.
+        tree = transform(parse(source), self._registry)
+        validate(tree, source)
         return self._run(tree, _Run(context or {}, source))
 
     def _run(self, tree: ast.Expression, run: _Run) -> Any:
@@ -378,6 +396,22 @@ class Evaluator:
 
     # -- operators ---------------------------------------------------------
     def _binop(self, node: ast.BinOp, run: _Run) -> Any:
+        # A bare name on the right of `|` that is neither a function nor in the context is almost
+        # always a mistyped pipe. Without this it degrades to bitwise-or and then reports "not
+        # defined", which is true but hides what the author was reaching for.
+        if (
+            isinstance(node.op, ast.BitOr)
+            and isinstance(node.right, ast.Name)
+            and node.right.id not in self._registry
+            and node.right.id not in run.context
+        ):
+            raise _error(
+                run,
+                node,
+                f"`{node.right.id}` is not a function, so `|` here means bitwise or"
+                f"{_suggest(node.right.id, sorted(self._registry))}",
+            )
+
         left = self._eval(node.left, run)
         right = self._eval(node.right, run)
         if isinstance(node.op, ast.Pow):

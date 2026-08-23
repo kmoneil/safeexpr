@@ -71,6 +71,18 @@ Scaffold only. Nothing in this package evaluates an expression yet.
   passes through the evaluator), and `"%s" % obj` handed back a context object's full `repr`.
   Integer and float modulo are unaffected.
 
+- **Pipes.** `items | where(...)` becomes `where(items, ...)`, and chains compose left to right.
+  The rewrite happens if and only if the right-hand side names a registered function, decided
+  without consulting the context, so an expression cannot mean different things on different data.
+  `bitor(a, b)` is always available for the case where a value shares a function's name.
+- **An expression depth limit** of 100 nested nodes, reported as a plain validation error.
+
+### Fixed
+- **A too-deep expression reported "this is a bug in safeexpr, please report it".** The evaluator
+  walks the tree recursively and gave out at about 497 nested operators, while the source cap
+  allowed 1023, so legal input produced an internal-error message telling the author to file a
+  bug. It is now a validation error naming the depth and the limit.
+
 ### Known limitations
 - **No pipes, lazy arguments or function registry yet**, so `where`, `map` and the rest of the
   data functions do not exist and `items | where(...)` does not parse as a pipe. What works today
