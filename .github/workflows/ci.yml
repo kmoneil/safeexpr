@@ -1,0 +1,142 @@
+# Continuous integration for safeexpr.
+#
+# Every lane below is invoked through `scripts/lanes.py`, never by spelling out a pytest or ruff
+# command here. Two spellings of "how this project runs its checks" is how a lane ends up with one
+# set of flags locally and another in CI, and the difference only surfaces when the two disagree
+# about a failure. `tests/test_lanes.py` asserts that every lane the runner knows about is named
+# in this file, so a lane cannot be added and left unwired.
+#
+# Third-party actions are pinned to a commit SHA with the tag in a trailing comment. A floating
+# tag is a mutable reference to somebody else's code with a token in scope. Re-pin deliberately,
+# reading the diff, rather than by moving the tag.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Static gates. Linux only: nothing these tools check is platform-dependent, and `src/` has no
+  # `sys.platform` branch that would narrow a type differently elsewhere.
+  #
+  # ruff and mypy are both here and they are not redundant. ruff's `target-version = "py310"` is
+  # what stops 3.11+ *syntax* reaching `src/`; mypy's `python_version = "3.10"` checks the floor's
+  # *semantics*. Neither sees what the other does.
+  # ---------------------------------------------------------------------------
+  gates:
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+      - run: uv python install
+      - run: uv sync --frozen
+      - run: uv run --frozen python scripts/lanes.py gates
+      - run: uv run --frozen python scripts/lanes.py format
+      - run: uv run --frozen python scripts/lanes.py types
+
+  # ---------------------------------------------------------------------------
+  # The lane that proves the product claim.
+  #
+  # R1 is the pitch: `pip install safeexpr` pulls exactly one pure-Python wheel. `tests/
+  # test_zero_deps.py` reads METADATA and runs everywhere, but it cannot catch a module that grew
+  # an eager third-party import, because the development environment has that import available
+  # and it simply succeeds. **The isolation is the lane**: this builds a wheel, installs it alone
+  # into an interpreter created with `--no-project`, and fails if anything outside the standard
+  # library arrives in `sys.modules`. It also checks the wheel is tagged `py3-none-any`, because
+  # "no dependencies" and "no compiled artifact" are two separate halves of the same promise.
+  # ---------------------------------------------------------------------------
+  zero-deps:
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+      - run: uv python install
+      - run: uv run --no-project --python 3.13 python scripts/lanes.py zero-deps
+
+  # ---------------------------------------------------------------------------
+  # The unit suite on the development interpreter, on both platforms.
+  #
+  # macOS is here rather than for completeness. This package's limits are measured in interpreter
+  # behaviour: the `ast.parse` bound that `MemoryError`s at ~5,900 nesting levels was measured on
+  # Linux, and a bound that differs by platform would make the documented source-length cap wrong
+  # somewhere. Cheap to check, expensive to discover from a bug report.
+  # ---------------------------------------------------------------------------
+  fast:
+    timeout-minutes: 15
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+      - run: uv python install
+      - run: uv sync --frozen
+      - run: uv run --frozen python scripts/lanes.py fast
+
+  # ---------------------------------------------------------------------------
+  # Every supported interpreter.
+  #
+  # **This matrix is load-bearing rather than routine.** Most libraries matrix on Python to catch
+  # syntax and API drift. This one matrices because the answers it depends on are interpreter
+  # behaviour, and several of them were measured to differ:
+  #
+  #   - 3.14 added `TemplateStr` and `Interpolation` (t-strings, PEP 750) as *expression* nodes,
+  #     so they are reachable in `mode="eval"` and the allowlist has to reject them. That
+  #     rejection can only be tested where the syntax parses.
+  #   - `AttributeError.obj`, the F9 leak, exists from 3.10 on and not before.
+  #   - Atomic groups and possessive quantifiers exist from 3.11 on, which is why they are not the
+  #     ReDoS mitigation at our floor.
+  #
+  # A corpus entry asserting "structurally unreachable" means nothing on one interpreter.
+  #
+  # **3.11 is named explicitly and that is deliberate.** The development environment this project
+  # was scaffolded in has 3.9, 3.10, 3.12, 3.13 and 3.14 installed but *not* 3.11, so a matrix
+  # written from what happened to be on the box would have skipped it silently.
+  #
+  # 3.13 is absent here because `fast` already runs it as the development interpreter. The five
+  # supported versions are covered by the two jobs together.
+  #
+  # **Deliberately unlocked, and that is not laziness.** `uv.lock` resolves for
+  # `python_version >= '3.13'` so the toolchain is not dragged back to the floor to serve a
+  # promise that is only about `src/`. Each row therefore builds its own environment.
+  # ---------------------------------------------------------------------------
+  compat:
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.11", "3.12", "3.14"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+      - run: uv python install ${{ matrix.python }}
+      - run: uv venv .venv-compat --python ${{ matrix.python }}
+      - run: uv pip install --python .venv-compat/bin/python -e . pytest hypothesis
+        # Invoked with the matrix row's own interpreter. `scripts/lanes.py` resolves a lane's tool
+        # from the directory beside `sys.executable` before it looks at `.venv/`, which is what
+        # makes this pick that row's pytest rather than the development one.
+      - run: .venv-compat/bin/python scripts/lanes.py compat
