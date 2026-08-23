@@ -75,11 +75,19 @@ dependencies = []
 dates = []
 unicode = []
 
+# Every one of these must resolve. METADATA advertising a Homepage that 404s is the same defect
+# as a docstring pointing at a file that is not there: a reader is told where to go and cannot get
+# there. `tests/test_packaging.py` asserts they are absolute and share one host, which is the
+# check that catches a half-finished rename.
+#
+# `Changelog` is listed separately because PyPI renders it as its own link on the project page,
+# and a release without a reachable changelog makes every user diff two sdists to find out what
+# moved.
 [project.urls]
-Homepage = "https://github.com/safeexpr/safeexpr"
-Source = "https://github.com/safeexpr/safeexpr"
-Issues = "https://github.com/safeexpr/safeexpr/issues"
-Changelog = "https://github.com/safeexpr/safeexpr/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/kmoneil/safeexpr"
+Source = "https://github.com/kmoneil/safeexpr"
+Issues = "https://github.com/kmoneil/safeexpr/issues"
+Changelog = "https://github.com/kmoneil/safeexpr/blob/main/CHANGELOG.md"
 
 [build-system]
 requires = ["hatchling"]
