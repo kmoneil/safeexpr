@@ -31,12 +31,33 @@ Scaffold only. Nothing in this package evaluates an expression yet.
   constant-subscript access to underscore-prefixed names is blocked, and only `_`, `_1`, `_2` and
   so on are accepted as names beginning with an underscore.
 
+- **Evaluator**, with `evaluate(source, context)` and an `Evaluator` class. Comparison,
+  arithmetic, boolean logic with Python's short-circuit semantics, chained comparison, field
+  access on mappings, indexing, slicing, and list/tuple/dict literals.
+  - Only registry functions can be called. A callable in the context is a value and nothing
+    more, so a dangerous function handed in as data cannot be invoked.
+  - Attribute access reads mapping keys. It does not reach into arbitrary objects unless the
+    host registers a type together with the attribute names it permits.
+  - Underscore-prefixed subscript keys are blocked at evaluation as well as at validation, which
+    covers computed keys such as `x["__cl" + "ass__"]`.
+  - `**` is capped on the estimated size of its result rather than on its exponent. Capping the
+    exponent misses a large base: `(10**100) ** 100000` takes about 10 seconds with an exponent
+    well under any exponent-only limit.
+  - An `Evaluator` holds nothing mutable and can be shared between threads.
+  - Field access needs no wrapper type, so a large context costs nothing at evaluation entry and
+    a self-referential one is harmless.
+
 ### Known limitations
-- **There is no evaluator.** Nothing here computes the value of an expression. The parse and
-  validation layers are private modules; only the error hierarchy is public API.
-- Validation catches underscore-prefixed subscript keys only when they are written as literals.
-  A computed key such as `x["__cl" + "ass__"]` passes this layer by design and is the
-  evaluator's responsibility, so that half of the defence does not exist yet.
+- **No pipes, lazy arguments or function registry yet**, so `where`, `map` and the rest of the
+  data functions do not exist and `items | where(...)` does not parse as a pipe. What works today
+  is comparison, arithmetic, field access and indexing over ordinary data.
+- **No evaluation budget.** A deeply nested expression over a large context is bounded only by
+  the source-length cap and the power cap, so evaluation time is not yet bounded by anything
+  proportional to the work done.
+- A `KeyboardInterrupt` arriving during an evaluation is converted into a `SafeExprError` rather
+  than propagating. That is deliberate, because the same containment is what stops a hostile
+  `__eq__` raising `SystemExit` past a host's `except Exception`, but it does mean Ctrl-C will
+  not interrupt an evaluation in progress.
 - The escape corpus is an empty directory with a schema sketch. Until it ships and passes, the
   package's central security claim is unproven, which is what the `Development Status :: 3 - Alpha`
   classifier is saying.

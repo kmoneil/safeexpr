@@ -203,6 +203,12 @@ ban-relative-imports = "parents"
 # `scripts/` inverts T20: printing the lane table *is* what the runner does, so "no print" there
 # would be a rule against the program.
 "scripts/**" = ["T20", "S603"]
+# ANN401 forbids `typing.Any`, and it is right almost everywhere. It is wrong here. This module
+# evaluates a dynamically-typed expression language: the type of a result *is* whatever the
+# expression produced, and the node handlers take and return exactly that. Annotating them
+# `object` would be no more truthful and would push a cast onto every caller. The rule stays on
+# for the rest of the package, where a stray `Any` really would be a missing annotation.
+"src/safeexpr/_eval.py" = ["ANN401"]
 "tests/**" = ["D", "ANN", "S101", "S603", "S607", "PLR2004", "T20"]
 
 # ---------------------------------------------------------------------------
