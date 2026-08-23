@@ -15,7 +15,7 @@ import pytest
 
 from safeexpr._errors import SafeExprError, ValidationError
 from safeexpr._parse import MAX_SOURCE_BYTES, parse
-from safeexpr._validate import _ALLOWED_NODES, validate
+from safeexpr._validate import _ALLOWED_NODES, MAX_EXPRESSION_DEPTH, validate
 
 
 def check(source: str) -> ast.Expression:
@@ -221,22 +221,38 @@ class TestF8ValidateOnceAndDoNotReExpose:
 
 
 class TestTheWalkIsIterative:
-    def test_a_tree_at_the_source_cap_does_not_exhaust_the_stack(self) -> None:
+    def test_a_tree_at_the_source_cap_reports_rather_than_crashing(self) -> None:
         """**A recursive validator would fail this**, and would have shipped.
 
         The source cap allows 2048 bytes, which is ~2,040 levels of unary nesting, while the
         default recursion limit is 1000. Measured: a recursive walk of this exact tree raises
-        `RecursionError`. The walk uses an explicit stack for that reason.
+        `RecursionError`. The walk uses an explicit stack, so the tree is walked to the end and
+        the depth limit gets to report on it, rather than the walk dying first.
+
+        The distinction that matters is *which* error comes out: a clean `ValidationError`
+        naming the depth, not a `RecursionError` dressed up as an internal bug.
         """
         source = "-" * (MAX_SOURCE_BYTES - 8) + "1"
         assert len(source.encode()) <= MAX_SOURCE_BYTES
-        assert check(source) is not None
+        with pytest.raises(ValidationError) as caught:
+            check(source)
+        assert "nests" in str(caught.value)
+        assert "bug" not in str(caught.value)
 
-    def test_a_deep_tree_of_rejected_nodes_still_reports_rather_than_crashing(self) -> None:
-        source = "~" * 1500 + "1"
+    def test_a_deep_tree_of_rejected_nodes_still_names_the_construct(self) -> None:
+        """Under the depth limit, the per-node message is what a reader needs."""
+        source = "~" * (MAX_EXPRESSION_DEPTH - 5) + "1"
         with pytest.raises(ValidationError) as caught:
             check(source)
         assert "~" in str(caught.value)
+
+    def test_depth_is_reported_before_anything_else(self) -> None:
+        """An expression this deep is unusable whatever else is wrong with it, so telling the
+        author about a lambda buried inside it would send them to fix the wrong thing."""
+        source = "~" * (MAX_EXPRESSION_DEPTH + 50) + "(lambda: 1)"
+        with pytest.raises(ValidationError) as caught:
+            check(source)
+        assert "nests" in str(caught.value)
 
 
 class TestOnlyOurErrorsEscape:

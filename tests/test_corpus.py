@@ -98,7 +98,15 @@ def _contexts() -> dict[str, dict[str, Any]]:
         },
         # F3: the callback-smuggling class. `os.system` is here deliberately: if any path from a
         # context value to call position existed, this is what would come through it.
-        "callables": {"danger": lambda n: n, "system": os.system, "obj": _Plain()},
+        "callables": {
+            "danger": lambda n: n,
+            "system": os.system,
+            "obj": _Plain(),
+            # Something to pipe, so the pipe entries fail on the pipe rather than on
+            # an undefined name.
+            "items": [1, 2, 3],
+            "x": {"k": 1},
+        },
         "object": {"obj": _Plain(), "x": _Plain()},
         "hostile_systemexit": {"x": _HostileEq(SystemExit)},
         "hostile_keyboardinterrupt": {"x": _HostileEq(KeyboardInterrupt)},
