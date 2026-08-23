@@ -11,6 +11,7 @@ import importlib.metadata as md
 import re
 import sys
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -127,6 +128,29 @@ def test_the_sdist_ships_the_corpus_and_the_tests(config: dict) -> None:
     include = config["tool"]["hatch"]["build"]["targets"]["sdist"]["include"]
     for required in ("/src", "/tests", "/corpus", "/LICENSE", "/README.md"):
         assert required in include, f"sdist would not ship {required}"
+
+
+def test_the_project_urls_are_absolute_and_share_one_host(config: dict) -> None:
+    """A renamed repository leaves dead links in METADATA that nothing else notices.
+
+    Sharing a host is the cheap check that catches a half-finished rename, where some URLs moved
+    and some did not.
+    """
+    urls = config["project"]["urls"]
+    for required in ("Homepage", "Source", "Issues", "Changelog"):
+        assert required in urls, f"[project.urls] lost {required}"
+    hosts = set()
+    for name, url in urls.items():
+        assert url.startswith("https://"), f"{name} is not an absolute https URL: {url}"
+        hosts.add(urlsplit(url).netloc)
+    assert len(hosts) == 1, f"[project.urls] spans several hosts, usually a typo: {sorted(hosts)}"
+
+
+def test_the_changelog_link_points_at_a_file_that_exists(config: dict) -> None:
+    """The link is to a path in this repository, so it can be checked here rather than by a
+    reader clicking it after release."""
+    changelog = config["project"]["urls"]["Changelog"].rsplit("/", 1)[-1]
+    assert (ROOT / changelog).is_file(), f"Changelog URL points at {changelog}, which is missing"
 
 
 def test_the_interpreter_running_this_is_one_we_claim() -> None:
