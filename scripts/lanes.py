@@ -78,6 +78,19 @@ LANES: tuple[Lane, ...] = (
         command=("pytest",),
     ),
     Lane(
+        name="corpus",
+        checks=(
+            "the escape corpus: every published escape class this package claims is "
+            "structurally unreachable, each asserted to be rejected at the stage it declares"
+        ),
+        needs=(
+            "uv sync --frozen. Its own lane rather than a subset of `fast` because it is the "
+            "artifact a security reviewer asks to see run, and a reviewer should not have to "
+            "read a full test run to find it"
+        ),
+        command=("pytest", "tests/test_corpus.py", "-v", "--no-header"),
+    ),
+    Lane(
         name="compat",
         checks=(
             "the same suite on one supported interpreter, invoked with that interpreter's own "

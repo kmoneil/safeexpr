@@ -95,6 +95,34 @@ jobs:
       - run: uv run --frozen python scripts/lanes.py fast
 
   # ---------------------------------------------------------------------------
+  # The escape corpus, on its own, on every supported interpreter.
+  #
+  # It runs inside `fast` and `compat` too, since it is ordinary pytest. It gets a job of its own
+  # because it is the artifact a security reviewer asks to see, and "find the corpus lines in a
+  # 240-test run" is a worse answer than a job whose whole output is the corpus.
+  #
+  # The matrix is not decoration here. Several entries are interpreter-dependent: t-strings parse
+  # on 3.14 and are a syntax error before it, so the same attack is rejected at a different stage
+  # on either side of that line, and `AttributeError.obj` (F9) exists only from 3.10.
+  # ---------------------------------------------------------------------------
+  corpus:
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+      - run: uv python install ${{ matrix.python }}
+      - run: uv venv .venv-compat --python ${{ matrix.python }}
+      - run: uv pip install --python .venv-compat/bin/python -e . pytest hypothesis
+      - run: .venv-compat/bin/python scripts/lanes.py corpus
+
+  # ---------------------------------------------------------------------------
   # Every supported interpreter.
   #
   # **This matrix is load-bearing rather than routine.** Most libraries matrix on Python to catch

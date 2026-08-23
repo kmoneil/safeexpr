@@ -300,6 +300,29 @@ class Evaluator:
         if isinstance(node.op, ast.Pow):
             return self._power(node, left, right, run)
 
+        # **`%` means modulo here, never string formatting**, and the distinction is only
+        # visible at runtime, which is precisely the F1 lesson. A static allowlist sees
+        # `BinOp(Mod)` and cannot tell `n % 3` from `"%(__class__)s" % d`. Measured against this
+        # evaluator before the guard existed:
+        #
+        #     "%(__class__)s" % d   ->  'REACHED'   the underscore-key block is bypassed, because
+        #                                           %-formatting does its own __getitem__ in C
+        #                                           and never passes through `_subscript`
+        #     "%s" % obj            ->  '<Host api_key=sk-live-SECRET>'
+        #                                           a context object's repr handed to the
+        #                                           expression author as a value
+        #
+        # The design bans `%` from the *registry*; it is not in the registry, it is an operator,
+        # so that ban never applied. Rejecting it on string and bytes keeps integer modulo, which
+        # is the only thing anybody wanted from `%` in a rules engine.
+        if isinstance(node.op, ast.Mod) and isinstance(left, (str, bytes)):
+            raise _error(
+                run,
+                node,
+                "`%` on text means string formatting, which can read attributes and keys that "
+                "this language does not allow; use `+` or `join` to build strings",
+            )
+
         op = _BINOPS[type(node.op)]
         symbol = _OP_SYMBOLS.get(type(node.op), "?")
         try:

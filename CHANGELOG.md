@@ -47,6 +47,20 @@ Scaffold only. Nothing in this package evaluates an expression yet.
   - Field access needs no wrapper type, so a large context costs nothing at evaluation entry and
     a self-referential one is harmless.
 
+- **Escape corpus.** `corpus/escapes-v1.jsonl` holds 57 entries covering every failure class
+  this package claims to close, each carrying its provenance and the stage at which it must be
+  rejected. `python scripts/lanes.py corpus` runs it; CI runs it on every supported interpreter
+  as a job of its own. Seven of the entries are controls that must still evaluate, because a
+  corpus of nothing but rejections would pass against a sandbox that refuses everything.
+
+### Fixed
+- **`%` on text no longer performs string formatting.** Found while writing the corpus. `%` is an
+  operator rather than a registry function, so the rule banning string formatting had never
+  applied to it, and two things got through: `"%(__class__)s" % d` read a key that the
+  underscore-key block should have stopped (%-formatting does its own lookup in C and never
+  passes through the evaluator), and `"%s" % obj` handed back a context object's full `repr`.
+  Integer and float modulo are unaffected.
+
 ### Known limitations
 - **No pipes, lazy arguments or function registry yet**, so `where`, `map` and the rest of the
   data functions do not exist and `items | where(...)` does not parse as a pipe. What works today
