@@ -26,8 +26,9 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # JSON on stdout so this side does the asserting and the child stays trivially readable.
 #
 # `sys.stdlib_module_names` is the authority for "is this the standard library", and it is a
-# frozenset of top-level names present since 3.10, which is our floor. Comparing against it beats
-# checking file paths, which vary by platform and by how the interpreter was built.
+# frozenset of top-level names present since 3.10, so it exists on every supported version.
+# Comparing against it beats checking file paths, which vary by platform and by how the
+# interpreter was built.
 PROBE = """
 import json, sys
 before = set(sys.modules)

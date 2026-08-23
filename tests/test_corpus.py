@@ -35,6 +35,7 @@ from safeexpr._errors import (
     SourceTooLongError,
     ValidationError,
 )
+from safeexpr._eval import LazyExpr, _Run
 from safeexpr._parse import MAX_SOURCE_BYTES, parse
 from safeexpr._validate import validate
 
@@ -72,6 +73,12 @@ class _HostileEq:
         raise self._raises
 
 
+def _a_lazy_expression() -> Any:
+    """Build a real `LazyExpr` over a subtree, for the F8 entries to probe."""
+    tree = parse("_.secret > 1")
+    return LazyExpr(Evaluator(), tree.body, _Run({}, "_.secret > 1"))
+
+
 def _contexts() -> dict[str, dict[str, Any]]:
     """Named contexts, because JSON cannot express a callable or a hostile object.
 
@@ -95,6 +102,11 @@ def _contexts() -> dict[str, dict[str, Any]]:
         "object": {"obj": _Plain(), "x": _Plain()},
         "hostile_systemexit": {"x": _HostileEq(SystemExit)},
         "hostile_keyboardinterrupt": {"x": _HostileEq(KeyboardInterrupt)},
+        # F8: a LazyExpr placed directly in the context, which is a stronger test than
+        # the design's scenario. The side table would have made one reachable by *naming*
+        # it; this hands one over outright and asserts the tree inside is still
+        # unreachable.
+        "lazy": {"x": _a_lazy_expression()},
     }
 
 

@@ -36,6 +36,7 @@ from typing import Any, ClassVar
 
 from ._errors import EvaluationError, SafeExprError, contained
 from ._parse import parse
+from ._registry import Function, as_function
 from ._validate import validate
 
 # **A cap on the result size, not on the exponent, and the difference is measured.**
@@ -90,13 +91,62 @@ class _Run:
 
     Separate from the evaluator so that an `Evaluator` holds nothing mutable and can be shared
     across threads. The step budget will live here too.
+
+    `items` is the stack of `_` bindings, innermost last. A stack rather than a single value
+    because lazy arguments nest: `customers | where(_.orders | any_(_.total > 100))` has two `_`
+    in scope at once, and being able to name the outer one is what makes the cross-level case
+    expressible at all.
     """
 
-    __slots__ = ("context", "source")
+    __slots__ = ("context", "items", "source")
 
     def __init__(self, context: Mapping[str, Any], source: str) -> None:
         self.context = context
         self.source = source
+        self.items: list[Any] = []
+
+
+class LazyExpr:
+    """An unevaluated expression, handed to a function that will run it per item.
+
+    Holds an already-parsed, already-validated subtree of the original expression. **Parse once,
+    evaluate N times**: filtering ten thousand items runs `ast.parse` zero extra times, which is
+    the difference between usable and not on a real collection.
+
+    The subtree is private and there is no path to it from the expression language. Attribute
+    access reaches mapping keys only, so even if an instance of this reached a context it would
+    be inert. That is the F8 property, and it holds because there is no side table keyed by a
+    name a user could type.
+    """
+
+    __slots__ = ("_evaluator", "_node", "_run")
+
+    def __init__(self, evaluator: Evaluator, node: ast.expr, run: _Run) -> None:
+        self._evaluator = evaluator
+        self._node = node
+        self._run = run
+
+    def evaluate(self, item: Any) -> Any:
+        """Evaluate the expression with `item` bound to `_`.
+
+        Args:
+            item: The value `_` refers to for this call.
+
+        Returns:
+            The value of the expression.
+        """
+        self._run.items.append(item)
+        try:
+            return self._evaluator._eval(self._node, self._run)  # noqa: SLF001
+        finally:
+            # A `finally` rather than a plain pop, so an error inside one item does not leave the
+            # stack deeper than it started and silently shift what `_` means afterwards.
+            self._run.items.pop()
+
+    def __repr__(self) -> str:
+        # Deliberately says nothing about the tree. A repr that unparsed the subtree would put
+        # expression internals into whatever logged it.
+        return "<LazyExpr>"
 
 
 def _error(run: _Run, node: ast.AST, message: str) -> EvaluationError:
@@ -104,8 +154,8 @@ def _error(run: _Run, node: ast.AST, message: str) -> EvaluationError:
 
     Returns rather than raises, so callers raise it outside any exception handler. That is the
     package-wide convention and the reason is in `_errors`: raising inside a handler leaves
-    `__context__` pointing at the caught exception, which on 3.10+ is a live handle on the
-    caller's data.
+    `__context__` pointing at the caught exception, which is a live handle on the caller's
+    data.
     """
     return EvaluationError(
         message,
@@ -141,9 +191,10 @@ class Evaluator:
     evaluation writes to the instance. One `Evaluator` may be shared freely between threads.
 
     Args:
-        registry: Name to callable, the only things an expression can call. Empty by default,
-            because the function registry is built separately; an evaluator with no registry is
-            a perfectly usable expression language for comparisons and field access.
+        registry: Name to `Function` (or to a bare callable, for the common case of one with no
+            lazy arguments). The only things an expression can call. Empty by default, because
+            the function registry is built separately; an evaluator with no registry is a
+            perfectly usable expression language for comparisons and field access.
         attribute_types: Opt-in `getattr` access, as type to permitted attribute names. **Left
             empty unless a host deliberately opts in**, because attribute traversal on arbitrary
             objects is where essentially every Python sandbox escape has started.
@@ -153,10 +204,12 @@ class Evaluator:
 
     def __init__(
         self,
-        registry: Mapping[str, Callable[..., Any]] | None = None,
+        registry: Mapping[str, Function | Callable[..., Any]] | None = None,
         attribute_types: Mapping[type, frozenset[str]] | None = None,
     ) -> None:
-        self._registry: dict[str, Callable[..., Any]] = dict(registry or {})
+        self._registry: dict[str, Function] = {
+            name: as_function(name, entry) for name, entry in (registry or {}).items()
+        }
         self._attribute_types: dict[type, frozenset[str]] = dict(attribute_types or {})
 
     @property
@@ -201,6 +254,8 @@ class Evaluator:
         return node.value
 
     def _name(self, node: ast.Name, run: _Run) -> Any:
+        if node.id.startswith("_"):
+            return self._item(node, run)
         try:
             return run.context[node.id]
         except (KeyError, TypeError):
@@ -211,6 +266,34 @@ class Evaluator:
             node,
             f"`{node.id}` is not defined{_suggest(node.id, list(run.context))}",
         )
+
+    def _item(self, node: ast.Name, run: _Run) -> Any:
+        """Resolve `_`, `_1`, `_2`, ... against the stack of lazy bindings.
+
+        `_` and `_1` are the innermost item; `_2` is one level out, and so on. Validation has
+        already guaranteed the name is an underscore followed by digits, so no other underscore
+        name reaches here.
+
+        Reaching outward is not a convenience. Under innermost-only binding,
+        `customers | where(_.orders | any_(_.total > _.threshold))`, meaning "orders above this
+        customer's threshold", is unwriteable, and it is an ordinary rules-engine expression.
+        """
+        depth = 1 if node.id in {"_", "_1"} else int(node.id[1:])
+        if not run.items:
+            raise _error(
+                run,
+                node,
+                f"`{node.id}` is only available inside a function argument that takes an "
+                f"expression, such as `where(_.price > 10)`",
+            )
+        if depth > len(run.items):
+            raise _error(
+                run,
+                node,
+                f"`{node.id}` reaches {depth} levels out but only {len(run.items)} "
+                f"{'is' if len(run.items) == 1 else 'are'} in scope here",
+            )
+        return run.items[-depth]
 
     # -- access ------------------------------------------------------------
     def _attribute(self, node: ast.Attribute, run: _Run) -> Any:
@@ -429,9 +512,15 @@ class Evaluator:
                 f"`{name}` is not a function{_suggest(name, sorted(self._registry))}"
                 + ("; values from the context cannot be called" if name in run.context else ""),
             )
-        arguments = [self._eval(argument, run) for argument in node.args]
+        # **The lazy positions are simply not evaluated.** No side table, no synthetic names, no
+        # rewritten tree: the function said which of its arguments are expressions, so those
+        # arrive as a `LazyExpr` over the original subtree and everything else arrives as a value.
+        arguments = [
+            LazyExpr(self, argument, run) if index in function.lazy else self._eval(argument, run)
+            for index, argument in enumerate(node.args)
+        ]
         try:
-            return function(*arguments)
+            return function.call(*arguments)
         except SafeExprError:
             raise
         except TypeError:

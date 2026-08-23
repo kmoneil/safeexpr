@@ -6,31 +6,38 @@ name = "safeexpr"
 dynamic = ["version"]
 description = "A safe expression language for Python. Pipes, data functions, dot access, zero dependencies."
 readme = "README.md"
-# **3.10, and the usual argument for it does not apply here.**
+# **3.11, and the argument is lifecycle rather than syntax.**
 #
 # The obvious reason to pick a floor for an `ast`-based project is that the node classes move
-# between versions. They do not, for anything this package parses. The parsed tree for the entire
-# supported grammar was diffed across 3.9, 3.10, 3.12, 3.13 and 3.14 and is identical on all five
-# measured directly. In particular `a[1]`, `a["k"]`, `a[1:2]` and `a[1,2]`
-# already produce `Subscript(slice=Constant|Slice|Tuple)` at 3.9, so `ast.Index` and
-# `ast.ExtSlice` never reach the transformer and it needs no version-conditional code at all.
+# between versions. They do not, for anything this package parses: the parsed tree for the entire
+# supported grammar was diffed across 3.9 through 3.14 and is identical on all six. `a[1]`,
+# `a["k"]`, `a[1:2]` and `a[1,2]` already produce `Subscript(slice=Constant|Slice|Tuple)` at 3.9,
+# so the transformer needs no version-conditional code at all.
 #
-# So the floor is a support-lifecycle decision rather than a technical one:
+# What decides it is support:
 #
-#   - 3.9 reached end of life in October 2025. A security package that installs on an
-#     interpreter receiving no security fixes is advertising a boundary it cannot hold up.
-#   - asteval, RestrictedPython and cel-python all already require >=3.10, so matching them
-#     costs no reach against the libraries we are measured against.
+#   - **3.10 reaches end of life on 2026-10-31.** A security package that installs on an
+#     interpreter receiving no security fixes is advertising a boundary it cannot hold up, and
+#     that date is close enough that shipping a 3.10 floor would mean raising it almost
+#     immediately.
+#   - 3.11 is supported to 2027-10, so everything in the matrix stays in security support.
+#   - Debian 12 ships 3.11, so the floor keeps a distro default that a 3.12 floor would cut.
 #
-# Two consequences worth writing down because they are easy to rediscover the hard way:
+# Three things 3.11 buys that 3.10 could not:
 #
-#   - `AttributeError.obj` exists from 3.10 on. It carries a *live reference* to the object an
-#     attribute access failed on, which is the F9 leak (RestrictedPython CVE-2024-47532), so the
-#     error boundary has to scrub unconditionally rather than behind a version check.
-#   - Atomic groups `(?>...)` and possessive quantifiers are 3.11+, verified absent on 3.9 and
-#     3.10. They therefore cannot be the ReDoS mitigation at this floor, which is why the
-#     `matches()` gate is a static pattern check instead.
-requires-python = ">=3.10"
+#   - **Atomic groups `(?>...)` and possessive quantifiers**, verified absent on 3.9 and 3.10.
+#     They are a real ReDoS mitigation and were unavailable at the old floor, which forced the
+#     `matches()` gate to be a static pattern check alone.
+#   - `tomllib` in the standard library, so the packaging tests no longer skip at the floor.
+#   - `BaseException.add_note`, so the note-leakage test runs everywhere rather than skipping.
+#
+# The cost is Ubuntu 22.04 LTS, which ships 3.10 and is supported into 2027. Accepted knowingly:
+# the alternative is shipping against an interpreter that is EOL within the quarter.
+#
+# One consequence to keep in view: **3.11 is the binding constraint on `MAX_SOURCE_BYTES`.** Its
+# parser gives out at 2,989 levels of operator nesting against ~5,975 on 3.12 through 3.14, and
+# it is the only supported version whose bound moves with `sys.setrecursionlimit`.
+requires-python = ">=3.11"
 license = "Apache-2.0"
 # The SPDX expression alone puts `License-Expression: Apache-2.0` in METADATA and ships no grant
 # text at all. Apache-2.0 section 4(a) requires the copy to travel with the distribution, and a
@@ -47,7 +54,6 @@ classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Developers",
   "Programming Language :: Python :: 3 :: Only",
-  "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
@@ -142,7 +148,7 @@ dev = [
 ]
 
 # The lock resolves for the development interpreter rather than the floor. The floor is a promise
-# about `src/`, not about the toolchain, and dragging pytest and mypy back to what 3.10 supports
+# about `src/`, not about the toolchain, and dragging pytest and mypy back to what 3.11 supports
 # would freeze the development environment to serve a claim the `compat` lane already checks by
 # building its own environment per interpreter.
 [tool.uv]
@@ -158,9 +164,9 @@ line-length = 100
 # thousands of findings in somebody else's code, which makes the gate useless before it has said
 # anything about ours.
 extend-exclude = [".uv-cache", ".venv-compat", "_tmp"]
-# **The floor, not the development interpreter.** This is what stops 3.11+ syntax reaching
+# **The floor, not the development interpreter.** This is what stops 3.12+ syntax reaching
 # `src/`, and it is the only gate that can: mypy's `python_version` checks semantics, not syntax.
-target-version = "py310"
+target-version = "py311"
 src = ["src", "tests"]
 
 [tool.ruff.lint]
@@ -226,16 +232,19 @@ ban-relative-imports = "parents"
 strict = true
 files = ["src"]
 # The floor rather than the development interpreter, so the type gate checks the semantics a
-# 3.10 user gets. Syntax is ruff's `target-version` above; these two are not interchangeable.
-python_version = "3.10"
+# 3.11 user gets. Syntax is ruff's `target-version` above; these two are not interchangeable.
+python_version = "3.11"
 warn_unreachable = true
 enable_error_code = [
   "redundant-expr",
   "truthy-bool",
   "ignore-without-code",
-  "explicit-override",
   "deprecated",
 ]
+# `explicit-override` is deliberately absent. Satisfying it means decorating overrides with
+# `@override`, which is `typing.override` on 3.12+ and `typing_extensions` below that. Our floor
+# is 3.11 and the package ships no dependencies, so the rule is unsatisfiable here rather than
+# merely inconvenient. Revisit if the floor ever reaches 3.12.
 
 # ---------------------------------------------------------------------------
 # pytest

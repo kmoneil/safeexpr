@@ -10,30 +10,13 @@ from __future__ import annotations
 import importlib.metadata as md
 import re
 import sys
+import tomllib
 from pathlib import Path
 from urllib.parse import urlsplit
 
 import pytest
 
 import safeexpr
-
-# `tomllib` arrived in 3.11 and our floor is 3.10, so this import is conditional rather than
-# assumed. Ruff's `target-version = "py310"` is what caught it: at the floor, `tomllib` is not
-# stdlib, and an unconditional import here would have failed the 3.10 matrix row.
-#
-# Skipping rather than adding `tomli` to the test dependencies is the right trade here. These
-# tests assert the *repository's* configuration, which is one file and identical on every
-# interpreter, so running them wherever a TOML parser exists is enough. Nothing about them is
-# interpreter-dependent, unlike the corpus, which has to run everywhere.
-try:
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover - only on 3.10
-    tomllib = None  # type: ignore[assignment]
-
-pytestmark = pytest.mark.skipif(
-    tomllib is None,
-    reason="tomllib is 3.11+; these assert repository config, which is interpreter-independent",
-)
 
 ROOT = Path(__file__).resolve().parent.parent
 PYPROJECT = ROOT / "pyproject.toml"
@@ -95,20 +78,20 @@ def test_the_floor_is_declared_everywhere_it_is_claimed(config: dict) -> None:
     A classifier list that has drifted from `requires-python` tells pip one thing and a human
     another.
     """
-    assert config["project"]["requires-python"] == ">=3.10"
+    assert config["project"]["requires-python"] == ">=3.11"
     classifiers = config["project"]["classifiers"]
     claimed = {
         c.rsplit(" :: ", 1)[-1]
         for c in classifiers
         if c.startswith("Programming Language :: Python :: 3.")
     }
-    assert claimed == {"3.10", "3.11", "3.12", "3.13", "3.14"}, (
-        f"classifiers claim {sorted(claimed)}; DECISIONS Q1-RESOLVED settles 3.10 through 3.14"
+    assert claimed == {"3.11", "3.12", "3.13", "3.14"}, (
+        f"classifiers claim {sorted(claimed)}; the floor is 3.11 and the matrix runs to 3.14"
     )
-    assert config["tool"]["ruff"]["target-version"] == "py310", (
-        "ruff's target-version is the only gate that stops 3.11+ *syntax* reaching src/"
+    assert config["tool"]["ruff"]["target-version"] == "py311", (
+        "ruff's target-version is the only gate that stops 3.12+ *syntax* reaching src/"
     )
-    assert config["tool"]["mypy"]["python_version"] == "3.10", (
+    assert config["tool"]["mypy"]["python_version"] == "3.11", (
         "mypy's python_version checks the floor's *semantics*; it is not interchangeable with "
         "ruff's target-version"
     )
@@ -155,6 +138,6 @@ def test_the_changelog_link_points_at_a_file_that_exists(config: dict) -> None:
 
 def test_the_interpreter_running_this_is_one_we_claim() -> None:
     """A guard against the suite silently passing on something outside the support window."""
-    assert sys.version_info >= (3, 10), (
+    assert sys.version_info >= (3, 11), (
         f"running on {sys.version_info.major}.{sys.version_info.minor}, below the declared floor"
     )

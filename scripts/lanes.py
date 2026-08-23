@@ -51,7 +51,7 @@ LANES: tuple[Lane, ...] = (
     ),
     Lane(
         name="types",
-        checks="mypy --strict over src/, at the 3.10 floor's semantics",
+        checks="mypy --strict over src/, at the 3.11 floor's semantics",
         needs="uv sync",
         command=("mypy",),
     ),

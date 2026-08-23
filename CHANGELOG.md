@@ -8,7 +8,7 @@ Scaffold only. Nothing in this package evaluates an expression yet.
 
 ### Added
 - Project scaffold: `pyproject.toml`, `src/safeexpr/` layout, Apache-2.0 licence text, CI matrix
-  over Python 3.10 through 3.14.
+  over Python 3.11 through 3.14.
 - Zero-dependency enforcement: `tests/test_zero_deps.py` reads declared metadata, and
   `scripts/check_zero_deps.py` imports a built wheel in an interpreter with nothing else in it.
 - `scripts/lanes.py`, the single spelling of how this project runs its checks, with
@@ -17,12 +17,22 @@ Scaffold only. Nothing in this package evaluates an expression yet.
   parser failure surfaces as a `SafeExprError`. The cap is set by Python 3.11, whose parser
   gives out at 2,989 levels of operator nesting against roughly 5,975 on every other supported
   version.
+- **Lazy arguments.** A registry function declares which of its argument positions are
+  expressions, and the evaluator does not evaluate those, handing over the unevaluated subtree
+  instead. This is what lets `where(items, _.price > 10)` work without a lambda. The expression
+  is parsed once and evaluated per item: filtering ten thousand items calls `ast.parse` exactly
+  once.
+- **`_` binds the innermost item, and `_2`, `_3` reach outward** one nesting level per index.
+  Reaching outward is not a convenience: under innermost-only binding, "orders above this
+  customer's threshold" is unwriteable, and it is an ordinary rules-engine expression.
+- The supported floor is **Python 3.11**, chosen so that every version in the matrix stays in
+  upstream security support. 3.10 reaches end of life on 2026-10-31.
 - **Public error hierarchy**, rooted at `SafeExprError` and exported from the package:
   `ParseError`, `ValidationError`, `SourceTooLongError`, `InternalError`. Every failure this
   package produces is one of these, and no error carries a reference to the data that caused it.
   Errors are constructed from scrubbed parts and raised outside the handler that caught the
-  cause, because `raise ... from None` leaves `__context__` live and on Python 3.10+ that is a
-  reachable handle on the caller's object.
+  cause, because `raise ... from None` leaves `__context__` live, and that is a reachable
+  handle on the caller's object.
 - `SafeExprError.annotated()` renders a message above the offending source with a caret under
   the position.
 - **Node allowlist.** The supported language is defined by what is listed rather than by what is

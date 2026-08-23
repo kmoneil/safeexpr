@@ -38,7 +38,7 @@ on every supported interpreter, because that corpus is the security claim.
 
 ## Requirements
 
-Python 3.10 through 3.14. No runtime dependencies, and that is asserted by
+Python 3.11 through 3.14. No runtime dependencies, and that is asserted by
 `tests/test_zero_deps.py` and by the `zero-deps` lane, which imports a built wheel in an
 interpreter that has nothing else installed.
 

@@ -31,7 +31,7 @@ jobs:
   # `sys.platform` branch that would narrow a type differently elsewhere.
   #
   # ruff and mypy are both here and they are not redundant. ruff's `target-version = "py310"` is
-  # what stops 3.11+ *syntax* reaching `src/`; mypy's `python_version = "3.10"` checks the floor's
+  # what stops 3.12+ *syntax* reaching `src/`; mypy's `python_version = "3.11"` checks the floor's
   # *semantics*. Neither sees what the other does.
   # ---------------------------------------------------------------------------
   gates:
@@ -101,9 +101,9 @@ jobs:
   # because it is the artifact a security reviewer asks to see, and "find the corpus lines in a
   # 240-test run" is a worse answer than a job whose whole output is the corpus.
   #
-  # The matrix is not decoration here. Several entries are interpreter-dependent: t-strings parse
-  # on 3.14 and are a syntax error before it, so the same attack is rejected at a different stage
-  # on either side of that line, and `AttributeError.obj` (F9) exists only from 3.10.
+  # The matrix is not decoration here. Some entries are interpreter-dependent: t-strings parse on
+  # 3.14 and are a syntax error before it, so the same attack is rejected at a different stage on
+  # either side of that line.
   # ---------------------------------------------------------------------------
   corpus:
     timeout-minutes: 15
@@ -111,7 +111,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        python: ["3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
@@ -132,17 +132,20 @@ jobs:
   #   - 3.14 added `TemplateStr` and `Interpolation` (t-strings, PEP 750) as *expression* nodes,
   #     so they are reachable in `mode="eval"` and the allowlist has to reject them. That
   #     rejection can only be tested where the syntax parses.
-  #   - `AttributeError.obj`, the F9 leak, exists from 3.10 on and not before.
-  #   - Atomic groups and possessive quantifiers exist from 3.11 on, which is why they are not the
-  #     ReDoS mitigation at our floor.
+  #   - `AttributeError.obj`, the F9 leak, exists from 3.10 on, so it is present on every
+  #     supported version and its corpus entries are unconditional.
+  #   - **3.11's parser gives out at 2,989 levels of operator nesting against ~5,975 elsewhere**,
+  #     raises `RecursionError` where the others raise `MemoryError`, and is the only supported
+  #     version whose bound moves with `sys.setrecursionlimit`. It sets `MAX_SOURCE_BYTES`.
   #
   # A corpus entry asserting "structurally unreachable" means nothing on one interpreter.
   #
   # **3.11 is named explicitly and that is deliberate.** The development environment this project
   # was scaffolded in has 3.9, 3.10, 3.12, 3.13 and 3.14 installed but *not* 3.11, so a matrix
-  # written from what happened to be on the box would have skipped it silently.
+  # written from what happened to be on the box would have skipped it silently. It was skipping
+  # the one version whose parser bound differs, which is how the source cap came to be wrong.
   #
-  # 3.13 is absent here because `fast` already runs it as the development interpreter. The five
+  # 3.13 is absent here because `fast` already runs it as the development interpreter. The four
   # supported versions are covered by the two jobs together.
   #
   # **Deliberately unlocked, and that is not laziness.** `uv.lock` resolves for
@@ -155,7 +158,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.10", "3.11", "3.12", "3.14"]
+        python: ["3.11", "3.12", "3.14"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1

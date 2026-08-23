@@ -17,7 +17,7 @@ from safeexpr._errors import ParseError, SafeExprError, SourceTooLongError
 from safeexpr._parse import MAX_SOURCE_BYTES, parse
 
 # The lowest parser cliff across the supported interpreters, measured by bisection at the default
-# recursion limit: 2,989 on **3.11**, against ~5,975 on 3.10 and 3.12 through 3.14. 3.11 is the
+# recursion limit: 2,989 on **3.11**, against ~5,975 on 3.12 through 3.14. 3.11 is the
 # outlier in all three respects: lowest bound, `RecursionError` rather than `MemoryError`, and the
 # only one that moves with `sys.setrecursionlimit`.
 LOWEST_PARSER_CLIFF = 2989
@@ -83,8 +83,8 @@ class TestNonSyntaxErrorFailuresAreContained:
         assert "MemoryError" in str(caught.value) or "RecursionError" in str(caught.value)
 
     def test_a_null_byte_is_contained_on_every_version(self) -> None:
-        """**Version-divergent**: `ast.parse` raises `ValueError` for this on 3.10 and
-        `SyntaxError` on 3.14. Both must surface identically."""
+        """**Version-divergent**: `ast.parse` raises `ValueError` for this on some supported
+        versions and `SyntaxError` on others. Both must surface identically."""
         with pytest.raises(ParseError):
             parse("1\x00+2")
 
@@ -197,9 +197,9 @@ class TestErrorsCarryTheUsersSourceAndNothingElse:
 
         `raise ... from None` is **not** enough. It clears `__cause__` and suppresses the
         traceback display, but `__context__` keeps pointing at the original exception, and on
-        3.10+ an `AttributeError` carries `.obj`, a live reference to the object whose access
-        failed. Measured: an error raised `from None` with a fully scrubbed message still yields
-        a live object through `err.__context__.obj`.
+        every supported version an `AttributeError` carries `.obj`, a reference to the object
+        whose access failed. Measured: an error raised `from None` with a fully scrubbed message
+        still yields a live object through `err.__context__.obj`.
 
         Assigning `__context__ = None` inside the handler does not fix it either, because CPython
         re-sets it as the raise executes. The error has to be raised after the handler exits, and

@@ -1,7 +1,7 @@
 r"""The parse boundary: the only place user source reaches CPython's parser.
 
 `ast.parse` is not a safe front door on its own, and the reasons are measured rather than
-assumed. Probed on 3.9, 3.10, 3.12, 3.13 and 3.14:
+assumed. Probed on every supported version:
 
 ===========================  ==================================================================
 input                        what `ast.parse(..., mode="eval")` does
@@ -10,7 +10,6 @@ input                        what `ast.parse(..., mode="eval")` does
                              default recursion limit:
 
                              ====== ========= ==================================
-                             3.10   **5,975** `MemoryError`
                              3.11   **2,989** `RecursionError`
                              3.12   **5,974** `MemoryError`
                              3.13   **5,974** `MemoryError`
@@ -23,8 +22,8 @@ input                        what `ast.parse(..., mode="eval")` does
                              (raising the limit to 3000 lifts it to 5,975). On every other
                              version the bound is the PEG parser's own and does not move at all
                              (checked at 1000, 5000 and 20000).
-``"1\x00+2"``                **`ValueError` on 3.10, `SyntaxError` on 3.14.** The same input,
-                             two exception types, split across the versions we support.
+``"1\x00+2"``                **`ValueError` on some versions, `SyntaxError` on others.** The
+                             same input, two exception types, split across the matrix.
 ``"'\ud800'"``               `UnicodeEncodeError`, on every version.
 ``b"1+1"``                   **succeeds.** Bytes parse, so a caller passing the wrong type gets
                              a working evaluation rather than an error.
@@ -56,8 +55,8 @@ from ._errors import ParseError, SourceTooLongError
 
 # **Set by Python 3.11, not by the majority.** The densest possible input is one operator per
 # byte (`-` or `~`), so N bytes cannot express more than N levels of nesting. The cliff is ~5,975
-# on 3.10 and 3.12 through 3.14, but only **2,989 on 3.11**, so a limit chosen from the majority
-# would be unsafe on exactly one supported interpreter.
+# on 3.12 through 3.14, but only **2,989 on 3.11**, so a limit chosen from the majority would be
+# unsafe on exactly one supported interpreter.
 #
 # 2048 leaves ~1.45x headroom on 3.11 and ~2.9x elsewhere. For scale, the longest expression in
 # the design's canonical use cases is under 100 bytes, so this is roughly 20x any realistic input

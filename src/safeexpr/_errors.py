@@ -9,7 +9,7 @@ looks: the parse boundary alone can produce `SyntaxError`, `ValueError`, `Unicod
 
 The obvious way to scrub an exception is `raise OurError(...) from None`. It does not work.
 `from None` clears `__cause__` and suppresses the "During handling of the above exception"
-display, but `__context__` keeps pointing at the original. On Python 3.10 and later an
+display, but `__context__` keeps pointing at the original. On every supported version an
 `AttributeError` carries `.obj`, a live reference to the object whose attribute access failed,
 so:
 
