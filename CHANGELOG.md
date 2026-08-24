@@ -342,6 +342,33 @@ in; the remaining function tiers and the evaluation budget are not.
   keyed by that text.
 
 ### Changed
+- **The benchmark suite runs in CI, against a threshold measured on the runner.** It had been in
+  the repository since the tier work, with seven saved baselines and a documented 10% gate, and
+  **none of it ran anywhere**: `measure` is not a default dependency group, so `uv sync --frozen`
+  never installed it and the unit lane silently collected nothing in that directory.
+
+  The new `measure` lane runs the timings, the `pytest-memray` allocation ceilings and an
+  import-time tripwire. CI runs it twice on the head and once on the merge base, all on one runner
+  in the same minutes, which is the only baseline strategy whose comparison is not confounded by
+  machine-to-machine variance. Committed baselines were rejected: they age against a moving runner
+  fleet and the refresh becomes a chore nobody owns.
+
+  **The gate is `min`, over 15%, and both halves of that are measured.** Two runs of identical
+  code on the runner deviate by up to 4.4% on a single row, and 15% is 3.4x that. The statistic
+  matters more than the number: on a busy development machine the same comparison gives min 2.7%,
+  median 9.2% and **mean 32.2%**, because one outlier in twenty thousand rounds moves a mean
+  further than any effect being measured. `scripts/measure.py` therefore refuses to be set on the
+  mean at its argument parser, with the reason in the error.
+
+  Each run also prints **that runner's own noise floor**, from the two head runs, directly above
+  the gate, so a red row can be read against the variance it was measured in rather than against a
+  number somebody wrote down once.
+
+  The import tripwire is 400 ms against a measured 23 to 26 ms, an order of magnitude of slack on
+  purpose. `import safeexpr` has no budget in a long-lived host, which is the documented
+  assumption; what the ceiling catches is a **new module-scope import**, which is the first sign of
+  the zero-dependency claim going wrong.
+
 - **Attribute access on a mapping is 5 to 14% faster on the collections tier**, and nothing else
   about it moved. `_attribute` tested `isinstance(value, Mapping)`, which runs once per attribute
   per item; `collections.abc.Mapping.__instancecheck__` is Python-level and dispatches into
