@@ -147,6 +147,87 @@ jobs:
       - run: .venv-compat/bin/python scripts/lanes.py corpus
 
   # ---------------------------------------------------------------------------
+  # The numbers, and the gate that keeps them.
+  #
+  # **Before this job existed the benchmark suite ran nowhere.** `tests/benchmarks/` had been in
+  # the repository since the tier work, `.benchmarks/` held seven saved baselines, `CLAUDE.md`
+  # mandated a 10% regression gate, and none of the eight lanes executed any of it. A win with no
+  # gate is a temporary win.
+  #
+  # **The baseline is the merge base, benchmarked on this runner in these minutes**, which is the
+  # only option whose comparison is not confounded by the thing it is trying to measure. The two
+  # alternatives were considered and rejected: committing baselines ages them against a moving
+  # runner fleet and makes the refresh a chore nobody owns, and `.benchmarks/` is git-ignored
+  # precisely so that cannot start happening by accident. It costs roughly double the runtime,
+  # which for one job of a few minutes is the cheapest part of this decision.
+  #
+  # **The head is run twice, and the second run is not a duplicate.** Comparing it against the
+  # first gives this runner's own noise floor for this run, printed above the gate, so a red row
+  # can be read against the variance it was measured in rather than against a number somebody
+  # wrote down once. A gate below the runner's own variance fails on green commits, and a gate
+  # that fails on green commits is disabled within a month.
+  #
+  # One job, one interpreter. The `compat` and `corpus` rows build minimal environments with
+  # pytest and hypothesis only, deliberately, and dragging a benchmark stack onto each would slow
+  # every one of them to measure something only meaningful on a stable machine.
+  # ---------------------------------------------------------------------------
+  measure:
+    timeout-minutes: 25
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The merge base has to be reachable, and the default shallow clone does not reach it.
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+      - run: uv python install
+      # `measure` is not a default group, so this is the only lane that installs it. That is the
+      # whole zero-dependency argument: the environment that runs the tests of a package with no
+      # dependencies does not quietly acquire `rich`, `textual` and a compiled tracer.
+      - run: uv sync --frozen --group measure
+
+      # The lane itself: timings, allocation ceilings, import-time tripwire.
+      - run: uv run --frozen --group measure python scripts/lanes.py measure
+      - run: cp .benchmarks/measure.json head-a.json
+
+      # The same commit again, for the noise floor.
+      - name: Measure this runner's own variance
+        run: |
+          uv run --frozen --group measure python scripts/measure.py \
+            --timings-only --out head-b.json
+          uv run --frozen --group measure python scripts/measure.py \
+            --compare head-a.json head-b.json \
+            --label "this runner's noise floor: identical code, two runs"
+
+      - name: Benchmark the merge base on this runner
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          head_sha="$(git rev-parse HEAD)"
+          git checkout --detach "$BASE_SHA"
+          # The base may predate this script, in which case there is no baseline and the step
+          # below says so rather than the job failing on a file that was never going to exist.
+          uv run --frozen --group measure python scripts/measure.py \
+            --timings-only --out base.json || echo "no measure.py on the base commit"
+          git checkout --detach "$head_sha"
+
+      - name: Compare against the merge base
+        if: github.event_name == 'pull_request'
+        run: |
+          set -euo pipefail
+          if [ ! -f base.json ]; then
+            echo "no baseline from the merge base; nothing to compare"
+            exit 0
+          fi
+          uv run --frozen --group measure python scripts/measure.py \
+            --compare base.json head-a.json \
+            --label "merge base against this head, same runner"
+
+  # ---------------------------------------------------------------------------
   # Every supported interpreter.
   #
   # **This matrix is load-bearing rather than routine.** Most libraries matrix on Python to catch
