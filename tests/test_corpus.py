@@ -30,13 +30,14 @@ import pytest
 
 from safeexpr import Evaluator, SafeExprError, standard_registry
 from safeexpr._errors import (
+    BudgetExceededError,
     EvaluationError,
     InternalError,
     ParseError,
     SourceTooLongError,
     ValidationError,
 )
-from safeexpr._eval import LazyExpr, _Run
+from safeexpr._eval import DEFAULT_STEP_BUDGET, LazyExpr, _Run
 from safeexpr._parse import MAX_SOURCE_BYTES, parse
 from safeexpr._validate import validate
 
@@ -63,7 +64,7 @@ REGISTRIES: dict[str, Callable[[], dict[str, Any]]] = {
 STAGE_ERRORS: dict[str, tuple[type[SafeExprError], ...]] = {
     "parse": (ParseError, SourceTooLongError),
     "validate": (ValidationError,),
-    "evaluate": (EvaluationError, InternalError),
+    "evaluate": (EvaluationError, InternalError, BudgetExceededError),
 }
 
 
@@ -89,7 +90,7 @@ class _HostileEq:
 def _a_lazy_expression() -> Any:
     """Build a real `LazyExpr` over a subtree, for the F8 entries to probe."""
     tree = parse("_.secret > 1")
-    return LazyExpr(Evaluator(), tree.body, _Run({}, "_.secret > 1"))
+    return LazyExpr(Evaluator(), tree.body, _Run({}, "_.secret > 1", DEFAULT_STEP_BUDGET))
 
 
 def _contexts() -> dict[str, dict[str, Any]]:
@@ -112,6 +113,9 @@ def _contexts() -> dict[str, dict[str, Any]]:
             # so `pluck` has something real to fail to reach.
             "rows": [{"__class__": "REACHED", "_private": "REACHED", "plan": "pro"}],
         },
+        # F4: work that multiplies. Two hundred items is nothing on its own and a hundred
+        # thousand inner evaluations once nested, which is the whole point of the failure class.
+        "large": {"items": list(range(200)), "other": list(range(200))},
         # F3: the callback-smuggling class. `os.system` is here deliberately: if any path from a
         # context value to call position existed, this is what would come through it.
         "callables": {
@@ -157,6 +161,9 @@ def _check_entry(entry: dict[str, Any], number: int, contexts: dict[str, Any]) -
         raise CorpusError(f"{entry['id']}: unknown context {entry['context']!r}")
     if entry.get("functions", "none") not in REGISTRIES:
         raise CorpusError(f"{entry['id']}: unknown functions {entry['functions']!r}")
+    budget = entry.get("budget", DEFAULT_STEP_BUDGET)
+    if not isinstance(budget, int) or isinstance(budget, bool) or budget < 1:
+        raise CorpusError(f"{entry['id']}: budget must be a positive integer, got {budget!r}")
 
 
 def _load(path: Path | None = None) -> list[dict[str, Any]]:
@@ -217,7 +224,14 @@ def _run_stages(entry: dict[str, Any]) -> tuple[str | None, SafeExprError | None
         # Entries whose whole point is length cannot be written out literally.
         source = source * (MAX_SOURCE_BYTES // len(source) + 8)
     context = _contexts()[entry["context"]]
-    evaluator = Evaluator(registry=REGISTRIES[entry.get("functions", "none")]())
+    # An entry may lower the budget. A denial-of-service entry has to *exhaust* the budget to
+    # prove anything, and exhausting the six-million-step default means about a second of real
+    # work per interpreter in the matrix. Lowering it tests the same barrier in milliseconds: the
+    # claim is that the counter stops unbounded work, not that six million is the right number.
+    evaluator = Evaluator(
+        registry=REGISTRIES[entry.get("functions", "none")](),
+        budget=entry.get("budget", DEFAULT_STEP_BUDGET),
+    )
 
     try:
         tree = parse(source)

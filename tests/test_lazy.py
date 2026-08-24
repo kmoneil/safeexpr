@@ -178,8 +178,29 @@ class TestF8NoSideTableAndNothingToReach:
 
         A test on the shape rather than on behaviour, because the behaviour tests above would
         keep passing if somebody reintroduced a table under a harder-to-guess prefix.
+
+        **The set is exact on purpose**, so that adding anything to the run state is a decision
+        somebody has to come here and make rather than something that happens quietly. `budget`
+        and `steps` were added with the step budget and are both plain integers; neither maps a
+        name to anything, which is the property this test exists to hold.
         """
-        assert set(_Run.__slots__) == {"context", "items", "source"}
+        assert set(_Run.__slots__) == {"budget", "context", "items", "source", "steps"}
+
+    def test_nothing_in_the_run_state_holds_a_tree(self, ev: Evaluator) -> None:
+        """The intent behind the slot list, checked against values rather than names.
+
+        A slot added later and named innocuously would pass the test above only after somebody
+        updated it; this one fails on what the slot actually holds, which is the thing that
+        matters.
+        """
+        run = _Run({"a": 1}, "a", 100)
+        for slot in _Run.__slots__:
+            value = getattr(run, slot)
+            assert not isinstance(value, ast.AST), f"{slot} holds an AST node"
+            if isinstance(value, dict):
+                assert not any(isinstance(v, ast.AST) for v in value.values()), (
+                    f"{slot} maps names to AST nodes, which is the side table this design removed"
+                )
 
     def test_a_leaked_lazyexpr_is_inert(self, ev: Evaluator) -> None:
         """Defence in depth. A registry function *could* hand its LazyExpr back as a value; ours

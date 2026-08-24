@@ -34,7 +34,7 @@ import operator
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, ClassVar
 
-from ._errors import EvaluationError, SafeExprError, contained
+from ._errors import BudgetExceededError, EvaluationError, SafeExprError, contained
 from ._parse import parse
 from ._pipes import transform
 from ._registry import Function, FunctionError, as_function, describe_type
@@ -55,6 +55,23 @@ from ._validate import validate
 # Provisional: the limits work sets every default empirically, and this one is derived from the
 # measurements above rather than from a benchmark of real expressions.
 MAX_POWER_RESULT_BITS = 8_388_608
+
+# **How much work one evaluation may do**, in nodes evaluated plus the declared cost of each
+# function called.
+#
+# Six million rather than the design's original hundred thousand, and the difference is the whole
+# argument. The canonical use cases measure at 4 to 6 steps per item, so a hundred thousand steps
+# buys about 16,000 to 25,000 items on the simplest possible filter. A package documenting support
+# for 10^5 items while raising on 25,000 of them is not bounding work, it is mis-stating its own
+# capability. Applying the design's own ">= 10x observed need" rule to the 599,984 steps measured
+# at 10^5 items gives six million, and 100,000 items runs in about 0.2 seconds there.
+#
+# The knob is per evaluator, and there is deliberately no way to switch it off. A host that needs
+# more says how much more, which is a number a reader can see and a reviewer can question.
+#
+# Provisional in the same sense as the other caps here: the empirical limits work owns the final
+# value.
+DEFAULT_STEP_BUDGET = 6_000_000
 
 # Always available, whatever registry a host supplies.
 #
@@ -109,12 +126,19 @@ class _Run:
     expressible at all.
     """
 
-    __slots__ = ("context", "items", "source")
+    __slots__ = ("budget", "context", "items", "source", "steps")
 
-    def __init__(self, context: Mapping[str, Any], source: str) -> None:
+    def __init__(self, context: Mapping[str, Any], source: str, budget: int) -> None:
         self.context = context
         self.source = source
         self.items: list[Any] = []
+        # **One counter, and the sharing is structural rather than remembered.** `LazyExpr` holds
+        # this same `_Run` and hands it back to `_eval`, so a predicate running once per item
+        # spends from the same pool as the expression that invoked it. There is no per-level
+        # budget to reset and no place to forget to thread one through, which is what makes
+        # `map(a, where(b, ...))` bounded at O(n*m) total rather than O(n) per level.
+        self.budget = budget
+        self.steps = budget
 
 
 class LazyExpr:
@@ -176,6 +200,34 @@ def _error(run: _Run, node: ast.AST, message: str) -> EvaluationError:
     )
 
 
+def _checked_budget(budget: object) -> int:
+    """Validate a budget at construction, where a host reads the message.
+
+    Takes `object` rather than `int` deliberately. The annotation on `Evaluator.__init__` is a
+    promise to a type-checked caller, and a host embedding this often is not one: a budget
+    arriving as a float, a string or `True` should be refused here rather than doing something
+    quietly strange several thousand steps into an evaluation. Typed as `int`, this function's
+    own checks would be provably redundant and the type checker would say so, which is why the
+    parameter widens instead of the checks being silenced.
+
+    `True` is refused rather than read as 1. `bool` is an `int` in Python, and a budget of `True`
+    is a mistake every time.
+
+    Args:
+        budget: The value the host passed.
+
+    Returns:
+        The budget, once it is known to be a positive integer.
+
+    Raises:
+        ValueError: If it is anything else.
+    """
+    if isinstance(budget, bool) or not isinstance(budget, int) or budget < 1:
+        message = f"budget must be a positive integer, got {budget!r}"
+        raise ValueError(message)
+    return budget
+
+
 def _suggest(name: str, candidates: Sequence[str]) -> str:
     """Return a ', did you mean X?' clause, or an empty string.
 
@@ -200,15 +252,24 @@ class Evaluator:
         attribute_types: Opt-in `getattr` access, as type to permitted attribute names. **Left
             empty unless a host deliberately opts in**, because attribute traversal on arbitrary
             objects is where essentially every Python sandbox escape has started.
+        budget: How many steps one evaluation may spend, counted per node evaluated plus each
+            function's declared cost. Every evaluation starts from this number, so it caps a
+            single `evaluate` call rather than the lifetime of the evaluator. There is no value
+            meaning "unlimited": a host needing more says how much more.
+
+    Raises:
+        ValueError: If `budget` is not a positive integer.
     """
 
-    __slots__ = ("_attribute_types", "_registry")
+    __slots__ = ("_attribute_types", "_budget", "_registry")
 
     def __init__(
         self,
         registry: Mapping[str, Function | Callable[..., Any]] | None = None,
         attribute_types: Mapping[type, frozenset[str]] | None = None,
+        budget: int = DEFAULT_STEP_BUDGET,
     ) -> None:
+        self._budget = _checked_budget(budget)
         self._registry: dict[str, Function] = {
             **_BUILTINS,
             **{name: as_function(name, entry) for name, entry in (registry or {}).items()},
@@ -219,6 +280,11 @@ class Evaluator:
     def function_names(self) -> frozenset[str]:
         """The names an expression may call."""
         return frozenset(self._registry)
+
+    @property
+    def budget(self) -> int:
+        """How many steps each evaluation may spend."""
+        return self._budget
 
     @contained
     def evaluate(self, source: str, context: Mapping[str, Any] | None = None) -> Any:
@@ -243,13 +309,31 @@ class Evaluator:
         # allowlist; and it preserves positions, so errors still point at what the user wrote.
         tree = transform(parse(source), self._registry)
         validate(tree, source)
-        return self._run(tree, _Run(context or {}, source))
+        return self._run(tree, _Run(context or {}, source, self._budget))
 
     def _run(self, tree: ast.Expression, run: _Run) -> Any:
         return self._eval(tree.body, run)
 
     # -- dispatch ----------------------------------------------------------
     def _eval(self, node: ast.AST, run: _Run) -> Any:
+        # **The whole budget, charged in one place.** Every value this language produces comes
+        # through here exactly once per node evaluated, including every re-evaluation of a lazy
+        # subtree, so counting here needs no cooperation from anything else: a function added
+        # later cannot forget to charge, and a new node type cannot arrive uncounted.
+        # **This costs about 30ns per node, against roughly 80ns for the dispatch below it, and
+        # no spelling makes it free.** A chained assignment, a countdown tested for truthiness and
+        # a list cell were all measured against this one and came out the same within noise; the
+        # irreducible part is reading and writing an attribute once per node. The price is paid
+        # deliberately: without it there is no bound on work at all, and the plainest version of
+        # the most security-critical line in the package is worth more than 15%.
+        run.steps -= 1
+        if run.steps < 0:
+            raise BudgetExceededError(
+                run.budget,
+                source=run.source,
+                lineno=getattr(node, "lineno", None),
+                offset=(node.col_offset + 1 if hasattr(node, "col_offset") else None),
+            )
         handler = self._DISPATCH.get(type(node))
         if handler is None:
             # Unreachable: validation runs first and rejects anything not in the allowlist. Kept
@@ -535,6 +619,17 @@ class Evaluator:
                 node,
                 f"`{name}` is not a function{_suggest(name, sorted(self._registry))}"
                 + ("; values from the context cannot be called" if name in run.context else ""),
+            )
+        # What the function costs beyond the nodes its arguments spend. A per-call figure: work
+        # that scales with a collection is already charged per item, because a lazy argument is
+        # re-evaluated through `_eval` once per item and each of those pays for itself.
+        run.steps -= function.cost
+        if run.steps < 0:
+            raise BudgetExceededError(
+                run.budget,
+                source=run.source,
+                lineno=node.lineno,
+                offset=node.col_offset + 1,
             )
         # **Arity before arguments.** Checked here, not by letting the call raise `TypeError`,
         # because those two failures are indistinguishable once they arrive: a function handed

@@ -25,6 +25,7 @@ right of a `|`. See `_stdlib` for the argument.
 from __future__ import annotations
 
 from ._errors import (
+    BudgetExceededError,
     EvaluationError,
     InternalError,
     ParseError,
@@ -37,6 +38,7 @@ from ._registry import Function, FunctionError
 from ._stdlib import standard_registry
 
 __all__ = [
+    "BudgetExceededError",
     "EvaluationError",
     "Evaluator",
     "Function",
