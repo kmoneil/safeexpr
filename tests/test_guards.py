@@ -23,6 +23,7 @@ three crashed the interpreter outright.
 
 from __future__ import annotations
 
+import ast
 import subprocess
 import sys
 from typing import Any
@@ -32,7 +33,15 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from safeexpr import EvaluationError, Evaluator, SafeExprError, standard_registry
-from safeexpr._guards import MAX_DATA_NESTING, check_depth
+from safeexpr._eval import _checked_depth, _Run
+from safeexpr._guards import (
+    MAX_DATA_NESTING,
+    MAX_RESULT_SIZE,
+    SIZE_CHARGE_UNIT,
+    check_depth,
+    concatenated_size,
+    size_charge,
+)
 from safeexpr._registry import FunctionError
 
 EV = Evaluator(registry=standard_registry())
@@ -289,6 +298,15 @@ class TestTheCheapPathStaysCheap:
         there and never goes deeper. Walking them would be work for nothing."""
         check_depth(value)
 
+    def test_the_evaluators_wrapper_repeats_the_test_so_it_is_safe_to_call_anywhere(self) -> None:
+        """Every call site tests `HASHABLE_CONTAINERS` before calling, so this backstop never
+        fires today. It stays, and is tested directly, because a guard that only works when the
+        caller remembers to guard it is not a guard."""
+        run = _Run({}, "x", 100)
+        node = ast.parse("x", mode="eval").body
+        for value in (1, "text", None, [1, 2]):
+            _checked_depth(run, node, value)
+
     def test_ordinary_expressions_are_unaffected(self, ev: Evaluator) -> None:
         assert ev.evaluate("k in s", {"k": 2, "s": {1, 2}}) is True
         assert ev.evaluate("d[k]", {"d": {"a": 1}, "k": "a"}) == 1
@@ -391,3 +409,138 @@ class TestRegressions:
             value = (value,)
         with pytest.raises(EvaluationError):
             EV.evaluate("a in s", {"a": value, "s": {1}})
+
+
+class TestWhatProducingAValueCosts:
+    """The memory-amplification policy's arithmetic, on its own.
+
+    The step budget counts nodes evaluated, and a node that allocates is one node however much it
+    allocates. Charging by the size of what a node produced is what folds memory into the budget,
+    and the unit is chosen so ordinary values cost nothing at all.
+    """
+
+    @pytest.mark.parametrize("value", [1, 1.5, True, None, object()])
+    def test_something_with_no_length_costs_nothing(self, value: Any) -> None:
+        assert size_charge(value) == 0
+
+    @pytest.mark.parametrize(
+        "value", ["", "x", "x" * (SIZE_CHARGE_UNIT - 1), [], [1, 2, 3], {"a": 1}, (1,), {1, 2}]
+    )
+    def test_anything_under_the_unit_costs_nothing(self, value: Any) -> None:
+        """**Integer division is the point.** An ordinary rule building short strings and small
+        lists pays exactly what it paid before the policy existed."""
+        assert size_charge(value) == 0
+
+    @pytest.mark.parametrize("multiple", [1, 2, 10, 1000])
+    def test_the_charge_is_one_step_per_unit(self, multiple: int) -> None:
+        assert size_charge("x" * (SIZE_CHARGE_UNIT * multiple)) == multiple
+        assert size_charge([0] * (SIZE_CHARGE_UNIT * multiple)) == multiple
+
+    def test_the_unit_is_the_documented_one(self) -> None:
+        assert SIZE_CHARGE_UNIT == 64
+
+
+class TestPredictingAConcatenation:
+    @pytest.mark.parametrize(
+        ("left", "right", "expected"),
+        [
+            ("ab", "cde", 5),
+            ([1, 2], [3], 3),
+            ((1,), (2, 3), 3),
+            (b"ab", b"c", 3),
+            (bytearray(b"ab"), bytearray(b"c"), 3),
+        ],
+    )
+    def test_it_predicts_the_length(self, left: Any, right: Any, expected: int) -> None:
+        assert concatenated_size(left, right) == expected
+
+    @pytest.mark.parametrize(
+        ("left", "right"), [(1, 2), ("a", 1), ("a", [1]), ([1], (2,)), ({"a": 1}, {"b": 2})]
+    )
+    def test_anything_that_is_not_concatenation_predicts_nothing(
+        self, left: Any, right: Any
+    ) -> None:
+        """`+` on two mappings is not concatenation and does not work at all, and `+` on two
+        numbers is arithmetic. Neither has a length to predict."""
+        assert concatenated_size(left, right) is None
+
+    def test_a_subclass_of_text_still_concatenates(self) -> None:
+        """**Written as a walk over families rather than as `type(left) is type(right)`.** An
+        identity check on types says a `str` subclass does not concatenate with a `str`, and it
+        does. The tiers' reflection gate refuses `type` anyway, which is how this was found."""
+
+        class Label(str):
+            __slots__ = ()
+
+        assert concatenated_size(Label("ab"), "c") == 3
+
+
+class TestTheSingleResultCaps:
+    """The per-result half of the policy. It bounds any one allocation; the budget charge bounds
+    the total, and neither is enough on its own."""
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "a + a",
+            "a + a + a + a",
+            "a * 2",
+            "2 * a",
+        ],
+    )
+    def test_a_result_over_the_cap_is_refused(self, ev: Evaluator, source: str) -> None:
+        with pytest.raises(EvaluationError) as caught:
+            ev.evaluate(source, {"a": [0] * (MAX_RESULT_SIZE // 2 + 1)})
+        assert "over the limit" in str(caught.value)
+
+    def test_text_concatenation_is_capped_the_same_way(self, ev: Evaluator) -> None:
+        with pytest.raises(EvaluationError) as caught:
+            ev.evaluate("a + a", {"a": "x" * (MAX_RESULT_SIZE // 2 + 1)})
+        assert "`+` would produce" in str(caught.value)
+
+    def test_ordinary_concatenation_is_untouched(self, ev: Evaluator) -> None:
+        assert ev.evaluate("a + b", {"a": "ab", "b": "c"}) == "abc"
+        assert ev.evaluate("a + b", {"a": [1], "b": [2]}) == [1, 2]
+        assert ev.evaluate("a + b", {"a": 1, "b": 2}) == 3
+
+    def test_extend_is_capped(self, ev: Evaluator) -> None:
+        big = [0] * (MAX_RESULT_SIZE // 2 + 1)
+        with pytest.raises(EvaluationError) as caught:
+            ev.evaluate("a | extend(a)", {"a": big})
+        assert "over the limit" in str(caught.value)
+
+    def test_merge_is_capped(self, ev: Evaluator) -> None:
+        first = {n: n for n in range(MAX_RESULT_SIZE // 2 + 1)}
+        second = {n + 10**8: n for n in range(MAX_RESULT_SIZE // 2 + 1)}
+        with pytest.raises(EvaluationError) as caught:
+            ev.evaluate("merge(a, b)", {"a": first, "b": second})
+        assert "over the limit" in str(caught.value)
+
+    def test_merge_is_checked_as_it_grows_because_keys_overlap(self, ev: Evaluator) -> None:
+        """The sum of the inputs is an upper bound, not an answer: merging a mapping with itself
+        produces the same size, not twice it."""
+        same = {n: n for n in range(MAX_RESULT_SIZE // 2 + 1)}
+        assert len(ev.evaluate("merge(a, a)", {"a": same})) == len(same)
+
+
+class TestAmplificationRegressions:
+    def test_regression_memory_concatenation_had_no_cap(self, ev: Evaluator) -> None:
+        """`*` was capped and `+` was not, so the same amplification was one character away.
+        Measured: `a + a + a + a` on a 200,000-item list produced 800,000 items from four nodes,
+        and doubling the input doubled it again with no limit anywhere."""
+        big = [0] * 400_000
+        with pytest.raises(EvaluationError) as caught:
+            ev.evaluate("a + a + a + a", {"a": big})
+        assert "`+` would produce" in str(caught.value)
+
+    def test_regression_memory_the_aggregate_case_no_cap_could_see(self, ev: Evaluator) -> None:
+        """Every string in this is far under the per-result cap and the total was 343 MB.
+
+        A per-result cap is structurally unable to catch it, which is why the budget charges by
+        size: the cost accumulates across items where a cap resets on each one.
+        """
+        text = "x" * 100_000
+        assert size_charge(text + text) * 1 < MAX_RESULT_SIZE, "each item is well under the cap"
+        with pytest.raises(SafeExprError) as caught:
+            ev.evaluate("rows | map(t + t)", {"rows": list(range(4000)), "t": text})
+        assert "budget" in str(caught.value)

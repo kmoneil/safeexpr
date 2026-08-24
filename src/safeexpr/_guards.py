@@ -57,6 +57,71 @@ MAX_RESULT_SIZE = 1_048_576
 # Provisional, like every other cap here: the empirical limits work owns the final value.
 MAX_DATA_NESTING = 1_000
 
+# **How many elements one step of budget buys.**
+#
+# The step budget counts nodes evaluated, and a node that allocates is one node however much it
+# allocates. Measured: `rows | map(t + t)` over two thousand rows of 100,000 characters is a
+# seventeen-character expression that allocates 343 MB, and nothing saw it. Per-result caps do not
+# help either, because every one of those two thousand strings is comfortably under the cap; it is
+# only the total that hurts.
+#
+# So producing a value also costs budget, at one step per 64 elements. **Integer division is the
+# point**: anything under 64 elements costs nothing at all, so an ordinary rule building short
+# strings and small lists pays exactly what it paid before, and only bulk allocation is charged.
+#
+# At the default budget of six million steps that bounds total production at roughly 384 million
+# elements, which is a few hundred megabytes of text. The useful property is that **one knob
+# bounds both time and memory**: a host that wants a tighter memory bound lowers the budget, and
+# both scale together.
+#
+# An element is a character for text and an item for a collection, so the two are not the same
+# number of bytes. Stated rather than papered over; a list of pointers costs more per element than
+# a string does.
+#
+# Provisional, like every other cap here: the empirical limits work owns the final value.
+SIZE_CHARGE_UNIT = 64
+
+# What has a length worth charging for. Concrete types rather than `collections.abc.Sized`,
+# because this runs on every call and every concatenation, and the ABC's `__instancecheck__` is
+# far slower than a tuple of concrete types.
+_SIZED = (str, bytes, bytearray, list, tuple, dict, set, frozenset)
+
+
+def size_charge(value: Any) -> int:
+    """How many steps producing `value` costs, beyond the node that produced it.
+
+    Args:
+        value: The value just produced.
+
+    Returns:
+        The extra steps to spend, which is zero for anything small or unsized.
+    """
+    if not isinstance(value, _SIZED):
+        return 0
+    return len(value) // SIZE_CHARGE_UNIT
+
+
+def concatenated_size(left: Any, right: Any) -> int | None:
+    """The length `left + right` would produce, if this is sequence or text concatenation.
+
+    Args:
+        left: The left operand.
+        right: The right operand.
+
+    Returns:
+        The resulting length, or `None` if `+` here is ordinary arithmetic.
+    """
+    # Written as a walk over the families `+` actually concatenates, rather than as
+    # `type(left) is type(right)`. Two reasons, and the tiers' reflection gate found the first:
+    # `type` is banned outright, and the ban is better without a carve-out for a harmless use.
+    # The second is that this version is simply more correct, because a subclass of `str`
+    # concatenates with a `str` and an identity check on types says it does not.
+    for family in (str, bytes, bytearray, list, tuple):
+        if isinstance(left, family) and isinstance(right, family):
+            return len(left) + len(right)
+    return None
+
+
 # A ceiling on the *walk*, not on the data. Shared structure makes a graph rather than a tree, and
 # a diamond of shared lists doubles the node count per level: thirty levels of `[x, x]` is a
 # billion visits from a structure holding thirty objects. The depth cap alone does not see that,

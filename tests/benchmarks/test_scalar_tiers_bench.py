@@ -42,6 +42,13 @@ once.
 gate parses and the engine compiles once, and every row after that is a search. Without the
 cache it would be the dearest thing here by a wide margin.
 
+**Measuring a small change on this box needs interleaving.** Running variant A eleven times and
+then variant B eleven times lands the drift on whichever went second: measured that way, the
+memory policy's size charge looked like +15% on an expression it does not touch. Alternating the
+two within one process and taking medians gave +2.3%, -1.7% and +3.9% on the same three
+expressions, which matches what the change actually does: nothing where no value is produced per
+item, and about 4% where one is. Alternate before believing a number under 10%.
+
 **How much of this table to believe.** Measured on the machine these were written on, two runs of
 *identical code* differed by up to 12% on a single row, and a controlled comparison of one commit
 against the next scattered from -15% to +36% with functions the change never touched moving most

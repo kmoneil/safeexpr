@@ -181,6 +181,15 @@ def _contexts() -> dict[str, dict[str, Any]]:
         # F4: data that defeats the operations rather than the expression. JSON cannot express
         # any of these, which is why they are built here.
         "nested": _hostile_data(),
+        # F4: allocation rather than time. Two hundred thousand items and a hundred thousand
+        # characters, which are ordinary sizes on their own and not once multiplied.
+        "bulk": {
+            "rows": list(range(2_000)),
+            "big": list(range(600_000)),
+            "text": "x" * 100_000,
+            "m": {n: n for n in range(600_000)},
+            "m2": {n + 10**8: n for n in range(600_000)},
+        },
         # F3: the callback-smuggling class. `os.system` is here deliberately: if any path from a
         # context value to call position existed, this is what would come through it.
         "callables": {
