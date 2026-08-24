@@ -34,7 +34,6 @@ from __future__ import annotations
 import argparse
 import ast
 import json
-import statistics
 import sys
 import time
 from pathlib import Path
@@ -160,14 +159,25 @@ def steps_for(source: str, context: dict[str, Any]) -> int:
 
 
 def seconds_for(source: str, context: dict[str, Any], rounds: int = 5) -> float:
-    """Median wall time for one evaluation."""
+    """The smallest wall time observed for one evaluation.
+
+    **Minimum rather than median, which is the rule this project already settled on** for every
+    wall-clock assertion in the suite: interference can only ever add time and never remove it, so
+    the smallest observation is the closest thing to an operation's own cost, while a genuinely
+    slow operation is slow in the minimum too and nothing is weakened.
+
+    This function was the exception, and it was an exception because it lives in `scripts/`
+    rather than in `tests/` and the sweep that hardened the rest did not reach it. The median of
+    three samples flaked `test_the_aggregates_are_within_a_small_factor` roughly one run in five
+    on a busy machine, which is a test nobody would keep believing.
+    """
     evaluator = Evaluator(registry=standard_registry())
     samples = []
     for _ in range(rounds):
         started = time.perf_counter()
         evaluator.evaluate(source, context)
         samples.append(time.perf_counter() - started)
-    return statistics.median(samples)
+    return min(samples)
 
 
 def expression_depth(source: str) -> int:
@@ -253,7 +263,7 @@ def blind_spots(items: int = 200_000) -> dict[str, float]:
         "sort_by": "nums | sort_by(_)",
     }
     return {
-        label: seconds_for(source, context, rounds=3) / steps_for(source, context) * 1e9
+        label: seconds_for(source, context) / steps_for(source, context) * 1e9
         for label, source in cases.items()
     }
 
