@@ -120,6 +120,18 @@ in; the remaining function tiers and the evaluation budget are not.
   declared and not yet charged.
 - `FunctionError`, for a registry function to say what is wrong with the values it was given. It
   carries a message and nothing else, and the evaluator adds the position.
+- **Differential testing against CPython itself**, over generated expressions inside the safe
+  subset. The property is that this package and `eval` either agree on a value or both refuse,
+  which keeps division by zero, mismatched comparisons and out-of-range indexing in the
+  generator's reach rather than steering it away from exactly the cases where disagreement would
+  hide.
+  - **Coverage of the allowlist is asserted, not hoped for.** A generator that drifts toward
+    atoms still produces thousands of examples and still reports zero divergence; shrinking the
+    generator to atoms and arithmetic leaves all 61 agreement tests passing and fails only the
+    coverage assertion. The allowlist is read from the validator rather than copied, so a node
+    type added to the language with no way to generate one fails here.
+  - Every refusal where Python succeeds is named: `%` on text, the size and power caps, and
+    attribute access on anything that is not a mapping.
 - **Every limit is now set from a measurement**, at ten times observed need or more, with
   `scripts/limits.py` in the repository to reproduce it and `tests/test_limits.py` asserting the
   ratios so they cannot drift back out.
