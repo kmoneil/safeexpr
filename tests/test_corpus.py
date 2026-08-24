@@ -87,6 +87,58 @@ class _HostileEq:
         raise self._raises
 
 
+def _hostile_data() -> dict[str, Any]:
+    """Values that make comparing or hashing them recurse.
+
+    `deep` is past the nesting cap; at a large enough depth hashing one of these does not raise at
+    all, it segmentation-faults the interpreter, which is why the cap is checked before `hash`
+    rather than around it. `left` and `right` refer to themselves. `diamond` is neither deep nor
+    cyclic: it is thirty levels of a value holding itself twice, so no path in it is long and the
+    number of values reachable through it is a billion.
+    """
+    deep: Any = ()
+    for _ in range(2_000):
+        deep = (deep,)
+    left: list[Any] = []
+    right: list[Any] = []
+    left.append(left)
+    right.append(right)
+    diamond: Any = ()
+    for _ in range(40):
+        diamond = (diamond, diamond)
+    return {
+        "deep": deep,
+        "left": left,
+        "right": right,
+        "diamond": diamond,
+        "keys": {1: "one"},
+        "set": {1, 2},
+        "shallow": (1, (2, (3,))),
+    }
+
+
+class _Prickly:
+    """A host object whose comparison and indexing both refuse, loudly.
+
+    F9 bait. Each refusal is a `TypeError` raised from this object's own code, so an error built
+    inside the handler that caught it keeps a live reference to this instance through
+    `__context__`, and `api_key` is reachable from there.
+    """
+
+    api_key = "sk-live-REACHABLE-THROUGH-CONTEXT"
+
+    def __eq__(self, other: object) -> bool:
+        raise TypeError("no comparing me")
+
+    def __lt__(self, other: object) -> bool:
+        raise TypeError("no ordering me")
+
+    def __getitem__(self, key: object) -> object:
+        raise TypeError("no indexing me")
+
+    __hash__ = None  # type: ignore[assignment]
+
+
 class _Talkative:
     """A host object whose text form carries a secret. Nothing may ever ask it for one."""
 
@@ -126,6 +178,9 @@ def _contexts() -> dict[str, dict[str, Any]]:
         # F4: work that multiplies. Two hundred items is nothing on its own and a hundred
         # thousand inner evaluations once nested, which is the whole point of the failure class.
         "large": {"items": list(range(200)), "other": list(range(200))},
+        # F4: data that defeats the operations rather than the expression. JSON cannot express
+        # any of these, which is why they are built here.
+        "nested": _hostile_data(),
         # F3: the callback-smuggling class. `os.system` is here deliberately: if any path from a
         # context value to call position existed, this is what would come through it.
         "callables": {
@@ -138,6 +193,9 @@ def _contexts() -> dict[str, dict[str, Any]]:
             "x": {"k": 1},
         },
         "object": {"obj": _Plain(), "x": _Plain()},
+        # F9: an object that raises from its own dunders, so the exception the evaluator catches
+        # holds a live reference to it.
+        "prickly": {"x": _Prickly(), "y": 1, "k": "a"},
         # F1: an object that *talks*. `_Plain` has no `__str__`, so converting one would produce
         # a bland default and prove nothing; this one puts the secret in the text it returns, so
         # an entry that reached `__str__` would show it.
