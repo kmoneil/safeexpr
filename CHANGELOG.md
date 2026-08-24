@@ -290,6 +290,26 @@ in; the remaining function tiers and the evaluation budget are not.
   build. `tests/test_packaging.py` asserts the include list names them, and its private-reference
   scan now covers them too.
 
+### Changed
+- **Attribute access on a mapping is 5 to 14% faster on the collections tier**, and nothing else
+  about it moved. `_attribute` tested `isinstance(value, Mapping)`, which runs once per attribute
+  per item; `collections.abc.Mapping.__instancecheck__` is Python-level and dispatches into
+  `_abc._abc_instancecheck` at 99.9 ns against 27.4 ns for a C type check, and `cProfile` put it
+  at roughly 1,500 calls per evaluation of the canonical pipeline. It is now
+  `isinstance(value, (dict, Mapping))`: `isinstance` walks a tuple left to right and stops at the
+  first hit, so a plain `dict` never enters the ABC.
+
+  Measured against the previous commit on one machine, medians: `map` +13.7%, `max_by` +11.0%,
+  `group_by` +10.3%, `canonical_pipeline` +7.4%, `where` +5.6%. `pluck`, which reads a key
+  directly and walks no attribute per item, and `bare_comparison`, which does one attribute in
+  the whole expression, both sit still, which is what makes the rest of the table an attribution
+  rather than a hope.
+
+  Behaviour is identical on every mapping kind, and reordering the two entries would give the
+  whole gain back with nothing failing. So the guard is a **call count**, not a timing gate: a
+  plain dict must reach the ABC zero times and a `ChainMap` once per row, asserted by swapping
+  the evaluator's `Mapping` for a counting probe, and the tuple's order is read off the source.
+
 ### Fixed
 - **The shipped test suite did not pass from the shipped source distribution.**
   `tests/test_lanes.py` reads `.github/workflows/ci.yml` to assert every lane is wired into CI,
