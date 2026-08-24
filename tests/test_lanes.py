@@ -7,9 +7,12 @@ nobody runs, which is worse than an absent one because the table implies coverag
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import re
+import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -21,6 +24,7 @@ RULESET = ROOT / ".github" / "rulesets" / "main.json"
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import lanes  # noqa: E402
+import measure  # noqa: E402
 
 
 def test_every_lane_is_invoked_by_ci() -> None:
@@ -244,4 +248,166 @@ def test_dependabot_watches_the_pinned_actions() -> None:
     assert "package-ecosystem: github-actions" in text
     assert "pip" not in text.split("updates:")[1], (
         "this package has no runtime dependencies to update, and uv.lock owns the dev ones"
+    )
+
+
+# ---------------------------------------------------------------------------------------------
+# The measurement lane.
+#
+# Before it existed the benchmark suite ran nowhere: `tests/benchmarks/` was written, `.benchmarks/`
+# held seven saved baselines, `CLAUDE.md` mandated a regression gate, and none of the eight lanes
+# executed any of it. These are the four things that would have to stay true for that not to
+# quietly become the case again.
+# ---------------------------------------------------------------------------------------------
+
+
+def test_regression_lanes_the_measure_lane_is_invoked_by_ci() -> None:
+    """`test_every_lane_is_invoked_by_ci` covers this, and a named test pins it anyway.
+
+    The general test is exactly the kind that gets an exemption added to it when one lane is
+    awkward, and this is the lane most likely to be the awkward one: it is the slowest, it is the
+    only one that checks out a second commit, and it is the only one whose failure is a number
+    rather than a yes or a no.
+    """
+    if not WORKFLOW.is_file():
+        pytest.skip("no .github/workflows/ci.yml: this is a distribution, not a checkout")
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    assert "lanes.py measure" in workflow
+    assert "measure" in {lane.name for lane in lanes.LANES}
+    assert "--group measure" in workflow, (
+        "the lane needs the measure dependency group, which `uv sync --frozen` does not install"
+    )
+
+
+def test_regression_lanes_the_benchmark_gate_can_actually_fail(tmp_path: Path) -> None:
+    """**A gate nobody has watched fail is not known to work.**
+
+    Two synthetic result files, the second slower than the first by more than the threshold, run
+    through the real comparison as a subprocess. This is the only test that establishes the gate
+    has teeth; everything else about it could be true of a comparison that always returns zero.
+    """
+    base = tmp_path / "base.json"
+    head = tmp_path / "head.json"
+    base.write_text(json.dumps(_results({"fast": 1.0e-3, "steady": 2.0e-3})), encoding="utf-8")
+    head.write_text(json.dumps(_results({"fast": 1.5e-3, "steady": 2.0e-3})), encoding="utf-8")
+
+    refused = _measure("--compare", str(base), str(head), "--fail-over", "min:10%")
+    assert refused.returncode != 0, refused.stdout + refused.stderr
+    assert "fast" in refused.stderr
+    assert "+50.0%" in refused.stderr
+
+    # And the same comparison without a threshold reports and does not fail, which is what the
+    # noise-floor half of the job relies on.
+    reported = _measure("--compare", str(base), str(head))
+    assert reported.returncode == 0, reported.stdout + reported.stderr
+    assert "50.0%" in reported.stdout
+
+
+def test_regression_lanes_the_gate_refuses_to_be_set_on_the_mean() -> None:
+    """The statistic is the decision, and it is the one most likely to be changed back.
+
+    `CLAUDE.md` asked for a mean-time gate and mean is unusable on this workload: measured twice,
+    against baselines taken minutes earlier on the same machine, mean reported a 45% regression in
+    a row the change could not touch. Refused at the argument parser so it cannot be set by
+    accident, with the reason in the error.
+    """
+    refused = _measure("--compare", "a.json", "b.json", "--fail-over", "mean:10%")
+    assert refused.returncode != 0
+    assert "refusing to gate on `mean`" in refused.stderr
+
+
+def test_regression_lanes_the_minimal_rows_still_collect_nothing_in_benchmarks() -> None:
+    """`compat` and `corpus` build environments with pytest and hypothesis only, deliberately.
+
+    `tests/benchmarks/conftest.py` is what keeps those rows green, by ignoring the directory's
+    files when their plugins are absent. Exercised by running that conftest with `find_spec`
+    reporting the plugins missing, because the alternative is a collection error on seven matrix
+    rows for a reason that has nothing to do with the package.
+    """
+    conftest = ROOT / "tests" / "benchmarks" / "conftest.py"
+    namespace: dict[str, object] = {"__file__": str(conftest)}
+    source = conftest.read_text(encoding="utf-8")
+
+    class _NothingInstalled:
+        @staticmethod
+        def find_spec(name: str) -> None:
+            return None
+
+    real = importlib.util
+    try:
+        importlib.util = _NothingInstalled  # type: ignore[assignment]
+        exec(compile(source, str(conftest), "exec"), namespace)  # noqa: S102
+    finally:
+        importlib.util = real  # type: ignore[assignment]
+
+    ignored = namespace["collect_ignore_glob"]
+    assert ignored == ["test_*_bench.py", "test_*_memory.py"], ignored
+
+    # And with them present, nothing is ignored, or the lane that needs them would collect nothing.
+    namespace = {"__file__": str(conftest)}
+    exec(compile(source, str(conftest), "exec"), namespace)  # noqa: S102
+    assert namespace["collect_ignore_glob"] == []
+
+
+def test_regression_lanes_the_measure_group_is_not_a_default_group() -> None:
+    """The whole zero-dependency argument rests on the test environment staying clean.
+
+    `uv sync --frozen` installs the default groups, and `fast`, `corpus` and `compat` all run
+    against that environment. Folding `pytest-benchmark`, `pytest-memray` and `pytest-cov` into
+    `dev` would put `rich`, `textual` and a compiled tracer into the environment that runs the
+    tests of a package whose entire pitch is that it has no dependencies, and would add ten seconds
+    of timing noise to every `fast` run to measure something only meaningful on an idle machine.
+    """
+    config = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    groups = config["dependency-groups"]
+    assert "measure" in groups, "the lane's dependency group is gone"
+    assert {"pytest-benchmark", "pytest-memray"} <= {
+        name.split(">")[0].split("=")[0].strip() for name in groups["measure"]
+    }
+    defaults = config.get("tool", {}).get("uv", {}).get("default-groups", ["dev"])
+    assert "measure" not in defaults, (
+        f"`measure` is a default group ({defaults}), so `uv sync --frozen` installs it and every "
+        f"other lane now runs with a compiled tracer and a terminal renderer in the environment"
+    )
+    dev = " ".join(groups["dev"])
+    for tool in ("pytest-benchmark", "pytest-memray", "pytest-cov"):
+        assert tool not in dev, f"{tool} moved into `dev`, which is a default group"
+
+
+def test_the_import_tripwire_is_loose_enough_to_be_actionable() -> None:
+    """A ceiling that fails for a reason nobody can act on gets deleted, not investigated.
+
+    `import safeexpr` measures 20 to 30 ms. The ceiling is an order of magnitude above that
+    deliberately: it is a tripwire against a new module-scope import, not a target, and the number
+    it protects is allowed to drift with the interpreter and the filesystem.
+    """
+    assert measure.MAX_IMPORT_SECONDS >= 0.2, "a tighter ceiling than this will fail on a busy box"
+    seconds = measure.import_seconds(rounds=3)
+    assert seconds < measure.MAX_IMPORT_SECONDS, (
+        f"import safeexpr took {seconds * 1000:.1f} ms against a "
+        f"{measure.MAX_IMPORT_SECONDS * 1000:.0f} ms ceiling"
+    )
+
+
+def _results(rows: dict[str, float]) -> dict[str, object]:
+    """A pytest-benchmark JSON document with the given per-row seconds."""
+    return {
+        "benchmarks": [
+            {
+                "fullname": f"tests/benchmarks/test_x.py::test_row[{name}]",
+                "stats": {"min": seconds, "median": seconds, "mean": seconds},
+            }
+            for name, seconds in rows.items()
+        ]
+    }
+
+
+def _measure(*args: str) -> subprocess.CompletedProcess[str]:
+    """Run `scripts/measure.py` as a subprocess, the way the lane does."""
+    return subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "measure.py"), *args],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=ROOT,
     )

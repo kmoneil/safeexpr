@@ -70,6 +70,9 @@
           },
           {
             "context": "compat (3.14)"
+          },
+          {
+            "context": "measure"
           }
         ],
         "strict_required_status_checks_policy": false
