@@ -292,7 +292,8 @@ on a warm one, and compare the two numbers. `python examples/threads.py` runs th
 The compiled-expression cache holds 128 entries per evaluator and is dropped whole when it fills.
 It is bounded rather than a plain dict because a host that accepts expression text from an
 untrusted source would otherwise hold an unbounded allocation keyed by that text; the bound and
-what it can cost are in [Performance](docs/performance.md#limits) beside every other limit.
+what it can cost are in [Performance](docs/performance.md#every-other-limit) beside every
+other limit.
 
 ## Non-goals
 
