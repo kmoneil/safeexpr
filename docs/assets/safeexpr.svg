@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 260" width="900" height="260"
+     role="img" aria-label="safeexpr: a safe expression language for Python, zero dependencies">
+  <title>safeexpr</title>
+  <defs>
+    <linearGradient id="panel" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#11161d"/>
+      <stop offset="100%" stop-color="#1b2430"/>
+    </linearGradient>
+    <linearGradient id="rule" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#3ddc97"/>
+      <stop offset="55%" stop-color="#4aa8ff"/>
+      <stop offset="100%" stop-color="#4aa8ff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="0" y="0" width="900" height="260" rx="22" fill="url(#panel)"/>
+  <rect x="0" y="0" width="900" height="260" rx="22" fill="none" stroke="#2c3846" stroke-width="2"/>
+
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace">
+    <text x="56" y="104" font-size="64" font-weight="700" fill="#e9eef5" letter-spacing="-1.5">
+      <tspan fill="#3ddc97">safe</tspan><tspan>expr</tspan>
+    </text>
+
+    <rect x="58" y="126" width="300" height="3" rx="1.5" fill="url(#rule)"/>
+
+    <text x="56" y="176" font-size="21" fill="#9fb0c3">
+      <tspan fill="#e9eef5">orders</tspan>
+      <tspan fill="#3ddc97" dx="8">|</tspan>
+      <tspan dx="8" fill="#4aa8ff">where</tspan><tspan fill="#9fb0c3">(_.status ==</tspan>
+      <tspan fill="#e0a458"> "paid"</tspan><tspan fill="#9fb0c3">)</tspan>
+      <tspan fill="#3ddc97" dx="8">|</tspan>
+      <tspan dx="8" fill="#4aa8ff">group_by</tspan><tspan fill="#9fb0c3">(_.customer)</tspan>
+    </text>
+
+    <text x="56" y="216" font-size="17" fill="#7d8ea1" letter-spacing="0.5">
+      a safe expression language for Python
+      <tspan fill="#3ddc97" dx="14">0 dependencies</tspan>
+    </text>
+  </g>
+</svg>
