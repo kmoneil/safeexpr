@@ -120,6 +120,30 @@ in; the remaining function tiers and the evaluation budget are not.
   declared and not yet charged.
 - `FunctionError`, for a registry function to say what is wrong with the values it was given. It
   carries a message and nothing else, and the evaluator adds the position.
+- **Guards on the host's data: how deeply it may nest, and what happens when it refers to
+  itself.** F4. Nothing here recurses over data; comparing and hashing it recurses in C on our
+  behalf, and the two fail differently.
+  - **Hashing does not raise, it crashes.** `tuplehash` does not use `Py_EnterRecursiveCall`, so
+    a deeply nested tuple exhausts the C stack and takes the interpreter with it: measured as an
+    exit-139 segmentation fault, with and without this package. A `try` cannot catch a crash, so
+    the depth is checked *before* the value reaches `hash`. Every path that hashes is covered:
+    membership against a set or mapping, a subscript into a mapping, a key in a dict literal, and
+    `group_by` and `unique_by`.
+  - **Comparison does raise**, on every supported interpreter, and is now reported as an ordinary
+    error. Before this, `a < b` on two self-referential lists said "internal error while
+    evaluating (RecursionError); this is a bug in safeexpr, please report it", which tells the
+    author to file a bug against a package that is working correctly.
+  - The walk is bounded in **visits as well as depth**. Shared structure makes a graph rather
+    than a tree, and forty levels of a value holding itself twice is a trillion values to reach
+    with no path longer than forty. Removing that bound makes the suite hang rather than fail.
+  - Data may nest 1,000 levels. Comparison gives out at 20,000 on 3.11 through 3.13 and at 60,000
+    on 3.14, and the available stack is not ours alone.
+- **Two error paths leaked a reference to the caller's data**, found by the corpus rather than by
+  looking. Comparing and indexing both caught a `TypeError` out of a host object's own code and
+  re-raised with `raise ... from None`, which clears `__cause__` and leaves `__context__` pointing
+  at the caught exception, and from there at the object that raised it. That is F9, and the error
+  module's own docstring warns against exactly this spelling. All three sites now build the error
+  inside the handler and raise it after the handler has exited.
 - **A shadowed pipe is refused rather than answered silently.** `values | min` against a context
   with its own `min` used to return the registry's answer with nothing said about the key it
   passed over; it now raises `ReservedNameError` naming the key, before anything is evaluated.

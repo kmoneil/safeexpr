@@ -49,6 +49,7 @@ import operator
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
+from ._guards import HASHABLE_CONTAINERS, check_depth
 from ._guards import sequence as _sequence
 from ._registry import Function, FunctionError, describe_type
 
@@ -79,6 +80,16 @@ def _key_for(lazy: LazyExpr, item: Any) -> Any:
         FunctionError: If the key cannot be hashed.
     """
     value = lazy.evaluate(item)
+    # **Before `hash`, not around it.** A deeply nested tuple does not raise on the way in; it
+    # exhausts the C stack and takes the interpreter with it, so there is nothing for the handler
+    # below to catch.
+    #
+    # The `isinstance` is here rather than only inside `check_depth` because this runs once per
+    # item and a Python call is not free: measured at 43us over a thousand keys, about 6% of a
+    # `group_by`, which the test alone brings to near nothing. `check_depth` repeats the test for
+    # callers that are not on a hot path.
+    if isinstance(value, HASHABLE_CONTAINERS):
+        check_depth(value)
     try:
         hash(value)
     except TypeError:

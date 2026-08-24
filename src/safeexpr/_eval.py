@@ -41,7 +41,7 @@ from ._errors import (
     SafeExprError,
     contained,
 )
-from ._guards import MAX_RESULT_SIZE
+from ._guards import HASHABLE_CONTAINERS, MAX_RESULT_SIZE, check_depth
 from ._parse import parse
 from ._pipes import shadowed_pipes, transform
 from ._registry import Function, FunctionError, as_function, describe_type
@@ -249,6 +249,34 @@ def _repetition_size(left: Any, right: Any) -> int | None:
         if isinstance(repeated, (str, bytes, bytearray, list, tuple)) and isinstance(count, int):
             return len(repeated) * count
     return None
+
+
+def _checked_depth(run: _Run, node: ast.AST, value: Any) -> None:
+    """Refuse a value too deeply nested to hash, positioned at the node that would hash it.
+
+    Every place the language can reach `hash` on a value from the context goes through here:
+    membership against a set or a mapping, a subscript into a mapping, and a key in a dict
+    literal. Hashing is the one operation that does not raise on data too deep for it, so this is
+    a check rather than a handler.
+
+    Args:
+        run: The evaluation state.
+        node: The node to point the error at.
+        value: The value about to be hashed.
+
+    Raises:
+        EvaluationError: If the value is too deeply nested.
+    """
+    if not isinstance(value, HASHABLE_CONTAINERS):
+        # The same test the call sites make, repeated so this is safe to call from anywhere.
+        return
+    try:
+        check_depth(value)
+    except FunctionError as objection:
+        failure = _error(run, node, f"this value {objection}")
+    else:
+        return
+    raise failure
 
 
 def _suggest(name: str, candidates: Sequence[str]) -> str:
@@ -508,18 +536,28 @@ class Evaluator:
                 f'key "{key}" is not available: keys beginning with an underscore are blocked',
             )
 
+        if isinstance(key, HASHABLE_CONTAINERS):
+            _checked_depth(run, node, key)
+        # Built inside the handler and raised outside it, like everywhere else here. A
+        # `raise ... from None` in the handler clears `__cause__` and leaves `__context__`
+        # pointing at the caught exception, and a `TypeError` from a host object's
+        # `__getitem__` is a live handle on the caller's data. That is F9, and the corpus
+        # checks every entry for it.
+        failure: EvaluationError | None = None
         try:
             return value[key]
         except (KeyError, IndexError):
             pass
         except TypeError:
-            raise _error(
+            failure = _error(
                 run,
                 node,
                 f"cannot index a value of type `{describe_type(value)}` "
                 f"with a `{describe_type(key)}`",
-            ) from None
-        raise _error(run, node, f"no entry for {key!r}")
+            )
+        if failure is None:
+            failure = _error(run, node, f"no entry for {key!r}")
+        raise failure
 
     def _slice(self, node: ast.Slice, run: _Run) -> slice:
         return slice(
@@ -537,11 +575,15 @@ class Evaluator:
 
     def _dict(self, node: ast.Dict, run: _Run) -> dict[Any, Any]:
         # Validation has already rejected `{**a}`, which is the only way a key can be None.
-        return {
-            self._eval(key, run): self._eval(value, run)
-            for key, value in zip(node.keys, node.values, strict=True)
-            if key is not None
-        }
+        built: dict[Any, Any] = {}
+        for key, value in zip(node.keys, node.values, strict=True):
+            if key is None:  # pragma: no cover - validation rejects `{**a}` first
+                continue
+            evaluated = self._eval(key, run)
+            if isinstance(evaluated, HASHABLE_CONTAINERS):
+                _checked_depth(run, key, evaluated)
+            built[evaluated] = self._eval(value, run)
+        return built
 
     # -- operators ---------------------------------------------------------
     def _binop(self, node: ast.BinOp, run: _Run) -> Any:
@@ -622,6 +664,16 @@ class Evaluator:
             )
         except (OverflowError, ValueError):
             failure = _error(run, node, f"`{symbol}` produced a result that cannot be represented")
+        except RecursionError:
+            # Reachable through the operands' own `__add__` and friends, which are host code.
+            # List and tuple concatenation is shallow and cannot recurse, so this is about the
+            # objects a host puts in a context rather than about nesting.
+            failure = _error(
+                run,
+                node,
+                f"cannot apply `{symbol}`: the operation recursed without end, which happens "
+                f"when values nest too deeply or refer to themselves",
+            )
         raise failure
 
     def _power(self, node: ast.BinOp, base: Any, exponent: Any, run: _Run) -> Any:
@@ -674,19 +726,50 @@ class Evaluator:
     def _compare(self, node: ast.Compare, run: _Run) -> Any:
         """Chained comparison. `1 < a < 3` evaluates `a` once and short-circuits."""
         left = self._eval(node.left, run)
+        # Both handlers build and `break`, so the raise below happens outside them. Leaving the
+        # handler is what restores the thread's "currently handled exception", and it is the only
+        # thing that keeps `__context__` clear: `raise ... from None` does not, and a `TypeError`
+        # out of a host object's `__eq__` is a live handle on the caller's data. F9, and the
+        # corpus checks every entry for it.
+        failure: EvaluationError | None = None
         for op, comparator in zip(node.ops, node.comparators, strict=True):
             right = self._eval(comparator, run)
+            # `a in b` hashes `a` when `b` is a set or a mapping, and hashing is the one
+            # operation that crashes rather than raising on data too deep for it. The second
+            # test is the cheap one and it is what keeps this off the hot path: nothing but a
+            # tuple or a frozenset can carry the recursion.
+            if isinstance(op, (ast.In, ast.NotIn)) and isinstance(left, HASHABLE_CONTAINERS):
+                _checked_depth(run, node, left)
             try:
                 outcome = _CMPOPS[type(op)](left, right)
             except TypeError:
-                raise _error(
+                failure = _error(
                     run,
                     node,
                     f"cannot compare `{describe_type(left)}` with `{describe_type(right)}`",
-                ) from None
+                )
+                break
+            except RecursionError:
+                # Comparison *does* raise, and CPython gives out between 5,000 and 10,000 levels
+                # of nesting or on the first cycle. Unguarded this reached the boundary and was
+                # reported as "this is a bug in safeexpr", which is the wrong answer to a
+                # legitimate complaint about the host's data.
+                #
+                # The wording covers a second cause as well: comparing calls the values' own
+                # `__eq__` and `__lt__`, which are host code, and host code that recurses without
+                # end arrives here identically.
+                failure = _error(
+                    run,
+                    node,
+                    "cannot compare these values: the comparison recursed without end, which "
+                    "happens when values nest too deeply or refer to themselves",
+                )
+                break
             if not outcome:
                 return False
             left = right
+        if failure is not None:
+            raise failure
         return True
 
     def _ifexp(self, node: ast.IfExp, run: _Run) -> Any:
