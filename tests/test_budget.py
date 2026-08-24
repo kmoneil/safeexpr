@@ -335,17 +335,27 @@ class TestFunctionCostsAreCharged:
 
         assert cost_of("dear") - cost_of("cheap") == 499
 
-    def test_the_dearer_tier_functions_cost_exactly_their_declared_extra(self) -> None:
-        """The same data and the same predicate, so the only difference left is the declared
-        cost. `sort_by` is priced at 5 against `map`'s 1, and the gap between them is 4.
+    def test_the_collections_tier_is_priced_flat(self) -> None:
+        """**This asserted a gap of 4 and now asserts none, because the 4 was a guess.**
 
-        Comparing `sort_by` against `where` instead would compare two different predicates:
-        `_ > 0` is three nodes per item and `_` is one, so `where` would come out dearer and the
-        test would be measuring the expressions rather than the prices.
+        `sort_by` was priced at 5 against `map`'s 1, on the reasoning that a comparison sort is
+        superlinear. The limits work measured the whole tier and found time per charged step
+        landing between 0.85 and 1.5 times a bare `map`, with no room in that spread for a cost
+        of 2 and certainly not 5. Charging for what a call reads and what it produces is what
+        closed the gap that the 5 was standing in for.
+
+        Same data and same predicate either way, so the only difference the test could see is
+        the declared cost, and there is none left to see.
         """
         context = {"a": list(range(5))}
         gap = steps_for("sort_by(a, _)", context) - steps_for("map(a, _)", context)
-        assert gap == COLLECTIONS["sort_by"].cost - COLLECTIONS["map"].cost == 4
+        assert gap == COLLECTIONS["sort_by"].cost - COLLECTIONS["map"].cost == 0
+
+    def test_matches_is_the_only_entry_priced_above_a_plain_scan(self) -> None:
+        """And its price is deliberate rather than measured: an accepted pattern still runs
+        inside `re`, where the counter cannot follow it."""
+        dearer = {name: f.cost for name, f in standard_registry().items() if f.cost != 1}
+        assert dearer == {"matches": 10}
 
     def test_a_costly_function_can_exhaust_the_budget_on_its_own(self) -> None:
         registry: dict[str, Any] = {
@@ -355,29 +365,45 @@ class TestFunctionCostsAreCharged:
             Evaluator(registry=registry, budget=100).evaluate("dear(1)", {})
 
 
-class TestWhatTheBudgetDoesNotBound:
-    """Characterisation, and the framing has changed now that the memory policy has landed.
+class TestACallIsChargedForWhatItReadsAndWhatItProduces:
+    """**This class asserted the opposite twice, and measurement is what settled it.**
 
-    **The charge is on the size of what a function *produces*, not on what it walks**, and that
-    is a decision rather than a leftover gap. `sum` over ten million integers returns one integer:
-    it allocates nothing proportional to its input, holds nothing, and takes a fraction of a
-    second. Charging it for its input would price a scan as though it were an allocation and would
-    make a legitimate aggregate expensive for no reason.
+    The step budget charged nodes evaluated. The memory policy added a charge for elements
+    produced. Both times the conclusion recorded here was that a function walking its input in C
+    without evaluating anything per item was an acceptable blind spot, on the reasoning that a
+    single pass of `sum` over ten million integers is a fraction of a second.
 
-    What actually hurts is holding the result, and that is charged.
+    That reasoning was wrong, and the limits work measured it: `sum` over 200,000 integers was
+    charged **three steps for 1.7 milliseconds**, roughly two thousand times less per unit of
+    work than an expression evaluated per item. One call is indeed a fraction of a second; the
+    default budget bought about **850,000** of them, which is eighteen minutes. That is exactly
+    the denial of service the budget exists to prevent, arriving through the one door it was not
+    watching.
+
+    A call is now charged for the size of its eager arguments as well as its result, so an
+    operation pays for what it reads and for what it keeps.
     """
 
-    def test_a_function_that_returns_one_value_costs_the_same_whatever_it_walks(self) -> None:
+    def test_a_function_that_walks_its_input_is_charged_for_walking_it(self) -> None:
+        """`sum` returns one integer either way. What differs is what it had to read."""
         small = steps_for("sum(a)", {"a": list(range(10))})
         large = steps_for("sum(a)", {"a": list(range(10_000))})
-        assert small == large, (
-            "the charge is on what a function produces, and `sum` produces one integer whatever "
-            "it was given"
-        )
+        assert large > small
 
-    def test_but_a_function_that_returns_a_large_value_is_charged_for_it(self) -> None:
-        """The half the memory policy added. `pluck` walks the same rows `sum` does and keeps
-        every one of them, and keeping is what costs."""
+    @pytest.mark.parametrize("source", ["sum(a)", "min(a)", "max(a)", "len(a)", "first(a)"])
+    def test_every_single_pass_function_is_charged_for_its_input(self, source: str) -> None:
+        """`len` and `first` are constant time and are charged anyway.
+
+        That is an over-charge and it is deliberate: exempting them needs a per-function
+        declaration, which is one more thing to get wrong, and the cost of being wrong the other
+        way is a blind spot. On a 200,000-item list the over-charge is 3,125 steps, which is
+        0.05% of the default budget.
+        """
+        small = steps_for(source, {"a": list(range(10))})
+        large = steps_for(source, {"a": list(range(100_000))})
+        assert large > small
+
+    def test_a_function_that_keeps_its_input_is_charged_for_that_too(self) -> None:
         small = steps_for("pluck(a, 'k')", {"a": [{"k": 1}] * 10})
         large = steps_for("pluck(a, 'k')", {"a": [{"k": 1}] * 10_000})
         assert large > small
@@ -386,6 +412,19 @@ class TestWhatTheBudgetDoesNotBound:
         small = steps_for("map(a, _ + 1)", {"a": list(range(10))})
         large = steps_for("map(a, _ + 1)", {"a": list(range(100))})
         assert large > small * 5
+
+    def test_a_lazy_argument_contributes_nothing_because_it_has_no_length(self) -> None:
+        """The subtree handed to `where` is not data and must not be priced as though it were."""
+        rows = [{"k": 1}] * 100
+        short = steps_for("where(a, _.k > 0)", {"a": rows})
+        long_predicate = steps_for("where(a, _.k > 0 and _.k > 0 and _.k > 0)", {"a": rows})
+        assert long_predicate > short, "a bigger predicate costs more, per node, as it should"
+
+    def test_regression_budget_an_aggregate_in_a_loop_is_bounded(self) -> None:
+        """The eighteen-minute expression, at a size that used to run and now does not."""
+        context = {"rows": list(range(20_000)), "nums": list(range(200_000))}
+        with pytest.raises(BudgetExceededError):
+            _evaluator(DEFAULT_STEP_BUDGET).evaluate("rows | map(sum(nums))", context)
 
 
 class TestProducingALargeValueCostsBudget:

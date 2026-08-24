@@ -166,11 +166,11 @@ STRINGS: dict[str, Function] = {
     "strip": Function("strip", _strip, arity=(1, 1)),
     "split": Function("split", _split, arity=(1, 2)),
     "join": Function("join", _join, arity=(2, 2)),
-    "replace": Function("replace", _replace, arity=(3, 3), cost=2),
+    "replace": Function("replace", _replace, arity=(3, 3)),
     "starts_with": Function("starts_with", _starts_with, arity=(2, 2)),
     "ends_with": Function("ends_with", _ends_with, arity=(2, 2)),
     "contains": Function("contains", _contains, arity=(2, 2)),
-    "slugify": Function("slugify", _slugify, arity=(1, 1), cost=2),
+    "slugify": Function("slugify", _slugify, arity=(1, 1)),
 }
 
 # Re-exported so the size cap has one name a reader can find from either side.

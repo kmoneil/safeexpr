@@ -235,7 +235,7 @@ ban-relative-imports = "parents"
 #
 # `scripts/` inverts T20: printing the lane table *is* what the runner does, so "no print" there
 # would be a rule against the program.
-"scripts/**" = ["T20", "S603"]
+"scripts/**" = ["T20", "S603", "ANN401"]
 # ANN401 forbids `typing.Any`, and it is right almost everywhere. It is wrong in these.
 # They evaluate a dynamically-typed expression language: the type of a value *is* whatever the
 # expression produced, and the node handlers and the registry tiers take and return exactly that.

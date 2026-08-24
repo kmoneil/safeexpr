@@ -526,12 +526,16 @@ class TestTheTierIsDeclaredConsistently:
         for name in declared:
             assert COLLECTIONS[name].lazy == frozenset({1}), name
 
-    def test_the_dearer_functions_are_priced_above_a_plain_scan(self) -> None:
-        """Absolute values are the step budget's to calibrate; the ordering carries the
-        meaning."""
-        assert COLLECTIONS["sort_by"].cost > COLLECTIONS["group_by"].cost
-        assert COLLECTIONS["group_by"].cost > COLLECTIONS["where"].cost
-        assert all(function.cost >= 1 for function in COLLECTIONS.values())
+    def test_every_function_in_this_tier_is_priced_the_same(self) -> None:
+        """**This asserted an ordering and now asserts its absence.**
+
+        The ordering was a guess: `sort_by` above `group_by` above `where`, on the reasoning that
+        a comparison sort is superlinear and that allocating functions are dearer than scans. The
+        limits work measured the tier with the budget charging for what a call reads, evaluates
+        and produces, and found time per charged step landing between 0.85 and 1.5 times a bare
+        `map` across all of it. An ordering the measurement cannot see is not an ordering.
+        """
+        assert {function.cost for function in COLLECTIONS.values()} == {1}
 
 
 # ---------------------------------------------------------------------------

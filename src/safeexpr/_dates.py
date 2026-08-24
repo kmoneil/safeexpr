@@ -114,8 +114,8 @@ def _check_directives(layout: str) -> None:
 
 
 DATES: dict[str, Function] = {
-    "parse_iso": Function("parse_iso", _parse_iso, arity=(1, 1), cost=2),
-    "format_date": Function("format_date", _format_date, arity=(2, 2), cost=2),
+    "parse_iso": Function("parse_iso", _parse_iso, arity=(1, 1)),
+    "format_date": Function("format_date", _format_date, arity=(2, 2)),
 }
 
 __all__ = ["DATES", "MAX_RESULT_SIZE"]

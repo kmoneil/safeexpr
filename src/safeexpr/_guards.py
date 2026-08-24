@@ -35,8 +35,10 @@ from ._registry import FunctionError, describe_type
 # thousand short strings, which is tens of kilobytes. It is small enough that the failure is a
 # message rather than a machine swapping, and large enough that no honest expression meets it.
 #
-# Provisional, in the same sense as every other cap here: the empirical limits work owns the
-# final value.
+# **Measured against need rather than chosen.** The largest result any canonical use case
+# produces at 100,000 items is 100,000, from `orders | map(_.customer_id)`, so the design's
+# ten-times rule puts the floor at a million. `scripts/limits.py` prints the ratio, currently
+# 10.5x, and `tests/test_limits.py` asserts it.
 MAX_RESULT_SIZE = 1_048_576
 
 # **How deeply host data may nest before it is refused, and why there is a number here at all.**
@@ -54,7 +56,10 @@ MAX_RESULT_SIZE = 1_048_576
 # host's own stack already is when it calls us, so a cap set near the ceiling would hold in a test
 # and fail from inside a framework. For scale, JSON from an ordinary API nests under twenty.
 #
-# Provisional, like every other cap here: the empirical limits work owns the final value.
+# **Measured at 143 times need**, which is loose and deliberately so: the floor is 7, the
+# deepest of an order record, a webhook payload and a nested configuration tree, and there is no
+# reason to sit close to it when the ceiling is 20,000 or more. Being generous here costs nothing
+# and being tight would refuse a legitimate configuration tree somebody actually has.
 MAX_DATA_NESTING = 1_000
 
 # **How many elements one step of budget buys.**
@@ -78,7 +83,11 @@ MAX_DATA_NESTING = 1_000
 # number of bytes. Stated rather than papered over; a list of pointers costs more per element than
 # a string does.
 #
-# Provisional, like every other cap here: the empirical limits work owns the final value.
+# **A rate, so the ten-times rule does not apply to it**, and it is pinned from both ends
+# instead. Above it, the aggregate case stops between one and two thousand rows of 200,000
+# characters, around 100 MB. Below it, the canonical pipeline at 100,000 items pays about 1,500
+# extra steps on 538,000, which is a third of a percent. Both ends are measured by
+# `scripts/limits.py`.
 SIZE_CHARGE_UNIT = 64
 
 # What has a length worth charging for. Concrete types rather than `collections.abc.Sized`,

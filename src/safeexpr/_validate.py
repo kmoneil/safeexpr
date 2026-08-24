@@ -43,20 +43,28 @@ from ._errors import ValidationError
 # name rather than as an attribute.
 _LAZY_NAME = re.compile(r"^_\d*$")
 
-# **How deeply an expression may nest.** Measured: the evaluator walks the tree recursively and
-# gives out between 497 and 498 nested operators at the default recursion limit of 1000, and the
-# source cap allows 1023. Without this, a legal 2 KB expression reported
-# "internal error ... this is a bug in safeexpr, please report it", which is the wrong answer to
-# input that is merely too deep.
+# **How deeply an expression may nest**, and the number sits in a window with a measured floor
+# and a measured ceiling.
 #
-# 100 rather than 400. The available depth is not ours alone: it depends on how deep the host's
-# own stack already is when it calls us, so a limit set near the measured ceiling would hold on a
-# bare call and fail from inside a framework. For scale, the deepest canonical use case nests
-# about 10, so 100 is roughly 10x anything realistic while leaving 4x headroom against a shallow
-# caller's ceiling.
+# The ceiling is 497. The evaluator walks the tree recursively and gives out there at the default
+# recursion limit, measured identically on 3.11, 3.13 and 3.14. Without a cap a legal 2 KB
+# expression reported "internal error ... this is a bug in safeexpr, please report it", which is
+# the wrong answer to input that is merely too deep.
 #
-# Provisional: the empirical limits work owns the final value.
-MAX_EXPRESSION_DEPTH = 100
+# The floor is 12. That is the deepest of a set of deliberately tangled but realistic rules, the
+# worst being a string-munging chain: `users | map(slugify(lower(strip(_.name)) + "-" + str(_.id)))
+# | unique_by(_) | take(20)`. The design's rule is ten times observed need, so the cap must be at
+# least 120.
+#
+# **125 is the smallest number that clears the floor**, and smallest is the right end of the
+# window to sit at, because the remaining headroom is not ours to spend: the evaluator uses about
+# two stack frames per level, so 125 costs roughly 250 of the interpreter's 1,000 and leaves the
+# rest for however deep the host already was when it called us. An earlier draft used 100, which
+# is 8.3 times observed need and fails the rule this package sets itself.
+#
+# `scripts/limits.py` prints both numbers and `tests/test_limits.py` asserts the ratio, so this
+# comment cannot quietly stop being true.
+MAX_EXPRESSION_DEPTH = 125
 
 # Operators the language has. `|` is here because it carries the pipe; ordinary bitwise algebra
 # is not a goal, so `&`, `^`, `<<`, `>>` and `@` are absent and `~` is absent from the unary set.

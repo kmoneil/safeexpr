@@ -372,27 +372,31 @@ def _all(items: Any, predicate: LazyExpr | None = None) -> bool:
 
 # The tier, as the evaluator sees it.
 #
-# **Costs are relative and per call, not per item.** A function whose work scales with the
-# collection is charged for the collection by the budget itself; what a number here says
-# is what one call is worth *on top* of that scan. So `sort_by` is dearer than `where` because a
-# comparison sort is superlinear rather than because it touches more items, and `group_by`,
-# `unique_by` and `merge` are dearer than a plain scan because each allocates as it goes. The
-# ordering is the part that carries meaning. The absolute values will be calibrated against a
-# real budget, and until that budget exists nothing reads them.
+# **Every cost here is 1, and that is a measured result rather than a default left alone.**
+#
+# An earlier draft priced `sort_by` at 5 and several others at 2, reasoning that a comparison
+# sort is superlinear and that allocating functions are dearer than scans. The limits work
+# measured it: with the budget charging for what a call reads, what it evaluates per item and
+# what it produces, the time per charged step across the whole tier lands between 0.85 and 1.5
+# times a bare `map`. There is no room in that spread for a cost of 2, let alone 5, and a number
+# that does not correspond to a measurement is a guess wearing a decimal point.
+#
+# `matches` is the one exception and it is in the regex tier, where the reason is written down:
+# its work happens inside `re`, which the counter cannot see at all.
 COLLECTIONS: dict[str, Function] = {
     "where": Function("where", _where, lazy=frozenset({1}), arity=(2, 2)),
     "map": Function("map", _map, lazy=frozenset({1}), arity=(2, 2)),
     "extend": Function("extend", _extend, arity=(2, 2)),
-    "group_by": Function("group_by", _group_by, lazy=frozenset({1}), arity=(2, 2), cost=2),
-    "unique_by": Function("unique_by", _unique_by, lazy=frozenset({1}), arity=(2, 2), cost=2),
-    "sort_by": Function("sort_by", _sort_by, lazy=frozenset({1}), arity=(2, 3), cost=5),
+    "group_by": Function("group_by", _group_by, lazy=frozenset({1}), arity=(2, 2)),
+    "unique_by": Function("unique_by", _unique_by, lazy=frozenset({1}), arity=(2, 2)),
+    "sort_by": Function("sort_by", _sort_by, lazy=frozenset({1}), arity=(2, 3)),
     "pluck": Function("pluck", _pluck, arity=(2, 2)),
     "max_by": Function("max_by", _max_by, lazy=frozenset({1}), arity=(2, 2)),
     "min_by": Function("min_by", _min_by, lazy=frozenset({1}), arity=(2, 2)),
     "first": Function("first", _first, arity=(1, 1)),
     "last": Function("last", _last, arity=(1, 1)),
     "take": Function("take", _take, arity=(2, 2)),
-    "merge": Function("merge", _merge, arity=(2, None), cost=2),
+    "merge": Function("merge", _merge, arity=(2, None)),
     "len": Function("len", _len, arity=(1, 1)),
     "sum": Function("sum", _sum, arity=(1, 1)),
     "min": Function("min", _min, arity=(1, 1)),
