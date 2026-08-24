@@ -22,9 +22,26 @@ evaluate(
 # True
 ```
 
-Pipes, lazy arguments and the function registry are not built yet, so the `|` examples above do
-not work today. The `CHANGELOG.md` "Known limitations" section is kept current with exactly what
-does and does not exist.
+Pipes and the collections tier work, and are opt-in:
+
+```python
+from safeexpr import Evaluator, standard_registry
+
+rules = Evaluator(registry=standard_registry())
+rules.evaluate(
+    'orders | where(_.status == "paid") | group_by(_.customer_id)'
+    ' | map(merge(_, {"n": len(_.items)}))',
+    {"orders": [{"customer_id": "c1", "status": "paid", "items": [1, 2]}]},
+)
+# [{'key': 'c1', 'items': [{'customer_id': 'c1', 'status': 'paid', 'items': [1, 2]}], 'n': 1}]
+```
+
+`Evaluator()` starts with no functions, and adding them is one argument rather than a default,
+because a registered name is reserved on the right of a `|`: with `first` registered,
+`flags | first` calls it whatever the context says `first` is.
+
+The string, type, date and URL functions are not built yet. The `CHANGELOG.md` "Known
+limitations" section is kept current with exactly what does and does not exist.
 
 The `Development Status :: 3 - Alpha` classifier stays until the escape corpus ships and passes
 on every supported interpreter, because that corpus is the security claim.

@@ -18,6 +18,7 @@ every supported interpreter; `python scripts/lanes.py corpus` runs just this.
 | `context` | Named fixture supplying the values, since JSON cannot express a callable |
 | `stage` | Where it must be rejected: `parse`, `validate` or `evaluate`, or `allowed` for a control |
 | `expect_message` | Substring the error must contain, so an entry cannot pass for the wrong reason |
+| `functions` | Optional. Which registry to run against: `none` (default) or `standard` |
 | `note` | Optional. What the attack is, and why it is interesting |
 | `python_min` / `python_max` | Optional. Some attacks only exist where the syntax does |
 
@@ -35,6 +36,18 @@ may carry `__cause__` or `__context__` (F9, checked corpus-wide), and every reje
 
 The `allowed` controls matter as much as the rejections. A corpus of nothing but rejections would
 pass against a sandbox that refuses everything, which is not a sandbox anybody can use.
+
+## Why `functions` is per entry and defaults to none
+
+A registry changes what an expression *means*, not just what it can do: registry membership is
+what tells the pipe transform that a `|` is a pipe rather than bitwise-or. An entry that does not
+need functions must not silently acquire them, so most entries run against an empty registry and
+the ones testing the data functions opt in by name.
+
+The collections tier earns entries of its own because it adds a surface no static check covers:
+`pluck` takes a field name as a *value*, so the name can arrive from the context and never appear
+in the source at all. The validator blocks `x.__class__` and `x["__class__"]` because it can read
+them; it has nothing to read here, which is why the same rule is repeated inside the function.
 
 ## Adding an entry
 

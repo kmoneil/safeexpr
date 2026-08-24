@@ -22,12 +22,13 @@ import ast
 import json
 import os
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from safeexpr import Evaluator, SafeExprError
+from safeexpr import Evaluator, SafeExprError, standard_registry
 from safeexpr._errors import (
     EvaluationError,
     InternalError,
@@ -44,6 +45,18 @@ CORPUS = Path(__file__).resolve().parent.parent / "corpus" / "escapes-v1.jsonl"
 FAILURE_CLASSES = {f"F{n}" for n in range(1, 10)}
 STAGES = {"parse", "validate", "evaluate", "allowed"}
 REQUIRED = {"id", "failure_class", "source_lib", "provenance", "expression", "stage", "context"}
+
+# Which functions an entry runs against, named by its optional `functions` field.
+#
+# **"none" is the default and most entries keep it**, because a registry changes what the source
+# *means*: registry membership is what tells the pipe transform a `|` is a pipe. An entry that
+# does not need functions must not silently acquire them, so opting in is per entry rather than
+# global. The collections tier gets entries of its own because it adds a surface the validator
+# structurally cannot see: a field name that arrives as a value rather than as source.
+REGISTRIES: dict[str, Callable[[], dict[str, Any]]] = {
+    "none": dict,
+    "standard": standard_registry,
+}
 
 # Errors each stage is allowed to raise. A rejection at the right stage for the wrong reason is
 # still a failed entry.
@@ -95,6 +108,9 @@ def _contexts() -> dict[str, dict[str, Any]]:
             "a": 2,
             "z": [1, 2, 3],
             "user": {"plan": "pro", "region": "eu"},
+            # For the collections tier: a row whose keys include the ones the language blocks,
+            # so `pluck` has something real to fail to reach.
+            "rows": [{"__class__": "REACHED", "_private": "REACHED", "plan": "pro"}],
         },
         # F3: the callback-smuggling class. `os.system` is here deliberately: if any path from a
         # context value to call position existed, this is what would come through it.
@@ -139,6 +155,8 @@ def _check_entry(entry: dict[str, Any], number: int, contexts: dict[str, Any]) -
     # A typo here would otherwise run the attack against the wrong data and pass for free.
     if entry["context"] not in contexts:
         raise CorpusError(f"{entry['id']}: unknown context {entry['context']!r}")
+    if entry.get("functions", "none") not in REGISTRIES:
+        raise CorpusError(f"{entry['id']}: unknown functions {entry['functions']!r}")
 
 
 def _load(path: Path | None = None) -> list[dict[str, Any]]:
@@ -199,7 +217,7 @@ def _run_stages(entry: dict[str, Any]) -> tuple[str | None, SafeExprError | None
         # Entries whose whole point is length cannot be written out literally.
         source = source * (MAX_SOURCE_BYTES // len(source) + 8)
     context = _contexts()[entry["context"]]
-    evaluator = Evaluator()
+    evaluator = Evaluator(registry=REGISTRIES[entry.get("functions", "none")]())
 
     try:
         tree = parse(source)
