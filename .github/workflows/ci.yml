@@ -167,15 +167,25 @@ jobs:
   # wrote down once. A gate below the runner's own variance fails on green commits, and a gate
   # that fails on green commits is disabled within a month.
   #
-  # **The threshold is `min:15%`, and it comes from that measurement rather than from a round
-  # number.** Two runs of identical code on this runner, 43 rows each, worst single-row deviation:
+  # **The threshold is `min:20%`, and it comes from that measurement rather than from a round
+  # number.** Five comparisons of code that cannot differ in what it measures, on this runner, 43
+  # rows each, worst single-row deviation:
   #
-  #     run 1     min 3.9%   median 4.1%   mean 5.0%
-  #     run 2     min 4.4%   median 4.1%   mean 4.4%
+  #     head against head     min 3.9%   median 4.1%   mean  5.0%
+  #     head against head     min 4.4%   median 4.1%   mean  4.4%
+  #     head against head     min 7.4%   median 6.8%   mean 10.0%
+  #     head against head     min 5.2%   median 4.9%   mean  5.0%
+  #     base against head     min 3.6%   median 6.7%   mean  3.4%
   #
-  # 15% is 3.4x the worst of those. It is not tighter because the estimate is two samples, and a
-  # gate at 2x a two-sample estimate of a noise floor is a gate that fails on a green commit
-  # eventually.
+  # 20% is 2.7x the worst of those. **The first draft of this said 15% and called it 3.4x, on two
+  # samples**; the third sample was 7.4% and the arithmetic stopped being true. That is what "enough
+  # runs to give a spread rather than a number" means, and the number moved rather than the claim.
+  #
+  # It is not tighter than 2.7x because the cost of the two errors is not symmetric. A gate that
+  # fails on a green commit gets disabled within a month, and then the repository is back where it
+  # started but with a lane that looks like a guard. A gate that lets a 15% regression through
+  # costs less than that, and the wins this exists to protect are also held by call counts in
+  # `tests/test_eval.py` and `tests/test_compile_cache.py`, which do not drift at all.
   #
   # **`min` rather than `mean`, and that is the part worth arguing.** `CLAUDE.md` asked for a
   # mean-time gate. On the development machine, two runs of identical code gave min 2.7%, median
@@ -243,7 +253,7 @@ jobs:
           uv run --frozen --group measure python scripts/measure.py \
             --compare base.json head-a.json \
             --label "merge base against this head, same runner" \
-            --fail-over min:15%
+            --fail-over min:20%
 
   # ---------------------------------------------------------------------------
   # Every supported interpreter.
