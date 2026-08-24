@@ -106,6 +106,23 @@ LANES: tuple[Lane, ...] = (
         command=("pytest", "tests/test_corpus.py", "-v", "--no-header"),
     ),
     Lane(
+        name="measure",
+        checks=(
+            "the numbers: the benchmark suite's timings, the pytest-memray allocation ceilings, "
+            "and how long `import safeexpr` takes. CI runs this twice on the head and once on the "
+            "merge base, all on one runner in the same minutes, and compares them"
+        ),
+        needs=(
+            "uv sync --frozen --group measure, which is **not** a default group and so is not "
+            "installed by the other lanes. One job on one interpreter, deliberately: the `compat` "
+            "and `corpus` rows build minimal environments to run the suite on four interpreters, "
+            "and dragging a benchmark stack onto each would slow every one of them to measure "
+            "something that is only meaningful on a stable machine. `tests/benchmarks/conftest.py` "
+            "skips that directory when the plugins are absent, which is what keeps those rows green"
+        ),
+        command=("python", "scripts/measure.py"),
+    ),
+    Lane(
         name="compat",
         checks=(
             "the same suite on one supported interpreter, invoked with that interpreter's own "
