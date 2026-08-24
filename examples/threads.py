@@ -24,8 +24,30 @@ from concurrent.futures import ThreadPoolExecutor
 from safeexpr import BudgetExceededError, Evaluator, SafeExprError, standard_registry
 
 RULES = Evaluator(registry=standard_registry())
+DEFAULT_BUDGET = RULES.budget
 
 RECORDS = [{"id": index, "value": index * 3} for index in range(2000)]
+
+
+def nothing_can_be_attached(evaluator: Evaluator) -> None:
+    """An evaluator is immutable after construction, and this is what that means."""
+    print("\n== and nothing can be attached to an evaluator afterwards ==\n")
+    for attempt, assign in (
+        ("evaluator.budget = 1", lambda: setattr(evaluator, "budget", 1)),
+        ("evaluator.sneaky = 'x'", lambda: setattr(evaluator, "sneaky", "x")),
+    ):
+        try:
+            assign()
+        except AttributeError as error:
+            print(f"  {attempt:<24} -> AttributeError: {error}")
+        else:
+            print(f"  {attempt:<24} -> it worked, which it must not")
+    print(f"\n  nothing was attached: {not hasattr(evaluator, 'sneaky')}")
+    print(f"  the budget is unchanged: {evaluator.budget == DEFAULT_BUDGET}")
+    print(
+        "\n  `__slots__`, and a read-only property. The wording of those two AttributeErrors is\n"
+        "  CPython's and moves between versions; the two lines under them are the promise."
+    )
 
 
 def main() -> None:
@@ -70,15 +92,7 @@ def main() -> None:
     print(f"    len([1, 2, 3])   -> {length!r}")
     print(f'    upper("x")       -> {uppered!r}')
 
-    print("\n== and nothing can be attached to an evaluator afterwards ==\n")
-    try:
-        evaluator.budget = 1  # type: ignore[misc]
-    except AttributeError as error:
-        print(f"  evaluator.budget = 1     -> AttributeError: {error}")
-    try:
-        evaluator.sneaky = "x"  # type: ignore[attr-defined]
-    except AttributeError as error:
-        print(f"  evaluator.sneaky = 'x'   -> AttributeError: {error}")
+    nothing_can_be_attached(evaluator)
 
     print("\n== the one thing that is shared process-wide ==\n")
     pattern = "^[a-z]+-[0-9]{4}$"
