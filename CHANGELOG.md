@@ -323,7 +323,6 @@ in; the remaining function tiers and the evaluation budget are not.
   the default selection, because a subset is faster by construction and timing one against a
   whole-suite ceiling would be measuring nothing.
 
-### Changed
 - **An evaluator compiles each source once instead of on every call**, which is **13 to 14x** on a
   rule that does not touch a collection. `evaluate()` parsed, rewrote and validated the source on
   every call and threw the result away; all of that depends only on `(source, registry)`, and the
@@ -374,7 +373,6 @@ in; the remaining function tiers and the evaluation budget are not.
   accepts expression text from an untrusted source would otherwise hold an unbounded allocation
   keyed by that text.
 
-### Changed
 - **The benchmark suite runs in CI, against a threshold measured on the runner.** It had been in
   the repository since the tier work, with seven saved baselines and a documented 10% gate, and
   **none of it ran anywhere**: `measure` is not a default dependency group, so `uv sync --frozen`
