@@ -7,6 +7,7 @@ nobody runs, which is worse than an absent one because the table implies coverag
 
 from __future__ import annotations
 
+import json
 import re
 import sys
 from pathlib import Path
@@ -16,6 +17,7 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 RELEASE = ROOT / ".github" / "workflows" / "release.yml"
+RULESET = ROOT / ".github" / "rulesets" / "main.json"
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import lanes  # noqa: E402
@@ -159,3 +161,87 @@ def test_publishing_is_the_only_job_that_can_publish() -> None:
     )
     # `contents: write` exists for the GitHub release and must not spread either.
     assert executable.count("contents: write") == 1
+
+
+def _ci_contexts() -> set[str]:
+    """The status-check names GitHub will report for `ci.yml`, derived from the file.
+
+    A job with a matrix reports once per row, named `job (value)`. Deriving them here rather than
+    listing them is the point: a job added to CI changes this set, and the test below then fails
+    until the ruleset requires it.
+    """
+    text = _workflow(WORKFLOW)
+    contexts: set[str] = set()
+    for name, body in re.findall(r"^  ([a-z][a-z-]*):\n((?:    .*\n|\n)*)", text, re.MULTILINE):
+        if "runs-on" not in body:
+            continue
+        values = re.search(r"os: \[(.*?)\]", body) or re.search(r"python: \[(.*?)\]", body)
+        if values is None:
+            contexts.add(name)
+            continue
+        contexts.update(
+            f"{name} ({value.strip().strip(chr(34))})" for value in values.group(1).split(",")
+        )
+    return contexts
+
+
+def test_every_ci_job_is_a_required_status_check() -> None:
+    """A gate nothing requires is a gate a merge can ignore.
+
+    The ruleset lives in repository settings, where `git` does not track it, a review cannot see
+    it and nothing here can read it. So it is **mirrored into the repository** as
+    `.github/rulesets/main.json` and checked against `ci.yml`, which is the half that can be
+    checked: a job added to CI and left out of the required set is a check that runs, reports, and
+    cannot block anything.
+
+    What this cannot verify is that the file still matches what is live. Read that back with:
+
+        gh api repos/kmoneil/safeexpr/rulesets --jq '.[]|select(.name=="main")|.id'
+        gh api repos/kmoneil/safeexpr/rulesets/<id>
+    """
+    if not RULESET.is_file():
+        pytest.skip("no .github/rulesets/main.json: this is a distribution, not a checkout")
+    ruleset = json.loads(RULESET.read_text(encoding="utf-8"))
+    required = {
+        check["context"]
+        for rule in ruleset["rules"]
+        if rule["type"] == "required_status_checks"
+        for check in rule["parameters"]["required_status_checks"]
+    }
+    expected = _ci_contexts()
+    assert expected - required == set(), (
+        f"CI jobs that cannot block a merge: {sorted(expected - required)}"
+    )
+    assert required - expected == set(), (
+        f"required checks no CI job reports, so a merge waits forever: "
+        f"{sorted(required - expected)}"
+    )
+
+
+def test_the_ruleset_keeps_the_rules_that_make_it_worth_having() -> None:
+    """Each of these is one somebody could drop while the ruleset still looked configured."""
+    if not RULESET.is_file():
+        pytest.skip("no .github/rulesets/main.json: this is a distribution, not a checkout")
+    ruleset = json.loads(RULESET.read_text(encoding="utf-8"))
+    kinds = {rule["type"] for rule in ruleset["rules"]}
+    assert {"deletion", "non_fast_forward", "pull_request", "required_status_checks"} <= kinds
+    assert ruleset["enforcement"] == "active", "a ruleset in evaluate mode enforces nothing"
+    assert ruleset["bypass_actors"] == [], (
+        "a bypass actor is a way around every rule above, including for whoever added it"
+    )
+
+
+def test_dependabot_watches_the_pinned_actions() -> None:
+    """The pins are asserted above; this is what makes them ageable.
+
+    A SHA cannot look outdated. Nothing reads as wrong and no gate fires, so without an updater
+    the first signal is a deprecation warning in a job log nobody opens between releases.
+    """
+    config = ROOT / ".github" / "dependabot.yml"
+    if not config.is_file():
+        pytest.skip("no .github/dependabot.yml: this is a distribution, not a checkout")
+    text = config.read_text(encoding="utf-8")
+    assert "package-ecosystem: github-actions" in text
+    assert "pip" not in text.split("updates:")[1], (
+        "this package has no runtime dependencies to update, and uv.lock owns the dev ones"
+    )
