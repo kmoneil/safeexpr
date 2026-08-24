@@ -316,7 +316,11 @@ def _matches(value: Any, pattern: Any) -> bool:
 
 
 REGEX: dict[str, Function] = {
-    # Dearer than any other entry, because this is the one function whose work happens outside
-    # the step budget entirely: the counter sees one call and `re` does the rest in C.
+    # **The one entry in the whole registry priced above 1**, and deliberately not from a
+    # measurement. Measured on a benign pattern it is *cheaper* per charged step than a bare
+    # `map`, which is exactly why the number is not taken from that: what the pattern gate bounds
+    # is the *shape* of a pattern, and an accepted pattern's runtime still happens inside `re`
+    # where the counter cannot follow it. Ten is a deliberate conservatism against the case the
+    # measurement cannot show.
     "matches": Function("matches", _matches, arity=(2, 2), cost=10),
 }

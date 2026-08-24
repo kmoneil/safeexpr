@@ -120,6 +120,27 @@ in; the remaining function tiers and the evaluation budget are not.
   declared and not yet charged.
 - `FunctionError`, for a registry function to say what is wrong with the values it was given. It
   carries a message and nothing else, and the evaluator adds the position.
+- **Every limit is now set from a measurement**, at ten times observed need or more, with
+  `scripts/limits.py` in the repository to reproduce it and `tests/test_limits.py` asserting the
+  ratios so they cannot drift back out.
+  - **`MAX_EXPRESSION_DEPTH` was 100 against a measured need of 12**, which is 8.3 times and
+    fails this package's own rule. It is 125: the smallest value clearing the floor, chosen at
+    that end of the window because the evaluator gives out at 497 and the remaining stack belongs
+    to whoever called us.
+  - **A call is now charged for what it reads**, not only for what it evaluates and produces.
+    Measured, `sum` over 200,000 integers was charged three steps for 1.7 milliseconds, two
+    thousand times less per unit of work than an expression evaluated per item, and
+    `rows | map(sum(nums))` bought about eighteen minutes from the default budget. That is the
+    denial of service the budget exists to prevent, arriving through the one door it was not
+    watching. Bounded at 2.6 seconds now.
+  - **Per-function step costs are all 1 except `matches`.** They were 1, 2 and 5 by eye; measured,
+    the whole tier lands between 0.85 and 1.5 times a bare `map` per charged step, with no room
+    for the differences the numbers claimed. `matches` keeps 10, and that one is a deliberate
+    conservatism rather than a measurement: its work happens inside `re`, where the counter
+    cannot follow.
+  - The step budget is confirmed rather than revised: 6,000,000 is 11.1 times the heaviest
+    canonical use case at 100,000 items, which measures 538,433 steps in 153 ms at a stable 4.0
+    to 5.4 steps per item.
 - **Producing a large value costs budget**, which is what bounds memory. The step budget counts
   nodes evaluated, and a node that allocates is one node however much it allocates: measured,
   `rows | map(t + t)` over four thousand rows of 100,000 characters is a seventeen-character

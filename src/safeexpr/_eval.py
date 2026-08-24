@@ -65,8 +65,10 @@ from ._validate import validate
 # So the guard is on the estimated width of the result. 1 MiB of integer is far past anything a
 # rules engine needs and stays in the low milliseconds.
 #
-# Provisional: the limits work sets every default empirically, and this one is derived from the
-# measurements above rather than from a benchmark of real expressions.
+# **Set by measured time rather than by observed need**, which is the honest basis for this one:
+# no realistic rule raises anything to a large power at all, so ten times need would be a
+# meaningless number near zero. The cap is where the operation stays in the low milliseconds, from
+# the table above.
 MAX_POWER_RESULT_BITS = 8_388_608
 
 # **How much work one evaluation may do**, in nodes evaluated plus the declared cost of each
@@ -82,8 +84,13 @@ MAX_POWER_RESULT_BITS = 8_388_608
 # The knob is per evaluator, and there is deliberately no way to switch it off. A host that needs
 # more says how much more, which is a number a reader can see and a reviewer can question.
 #
-# Provisional in the same sense as the other caps here: the empirical limits work owns the final
-# value.
+# **Re-measured after the per-call costs and the size charge existed**, which the decision record
+# asked for, because both change the arithmetic. The heaviest canonical use case at 100,000 items
+# is the pipeline at 538,000 steps in 155 ms, so six million is 11.1 times observed need and
+# clears the ten-times rule. The measured cost is 4.0 to 5.8 steps per item across three orders of
+# magnitude, which is what makes a budget expressible in items at all.
+#
+# `scripts/limits.py` prints this and `tests/test_limits.py` asserts the ratio.
 DEFAULT_STEP_BUDGET = 6_000_000
 
 # Always available, whatever registry a host supplies.
@@ -866,13 +873,7 @@ class Evaluator:
                 node,
                 f"`{name}` takes {function.arity_text()}, got {len(node.args)}",
             )
-        # **The lazy positions are simply not evaluated.** No side table, no synthetic names, no
-        # rewritten tree: the function said which of its arguments are expressions, so those
-        # arrive as a `LazyExpr` over the original subtree and everything else arrives as a value.
-        arguments = [
-            LazyExpr(self, argument, run) if index in function.lazy else self._eval(argument, run)
-            for index, argument in enumerate(node.args)
-        ]
+        arguments = self._arguments(node, function, run)
         try:
             produced = function.call(*arguments)
         except SafeExprError:
@@ -911,6 +912,43 @@ class Evaluator:
                 _spend(run, node, charge)
             return produced
         raise failure
+
+    def _arguments(self, node: ast.Call, function: Function, run: _Run) -> list[Any]:
+        """Evaluate the eager arguments, skip the lazy ones, and charge for what was read.
+
+        Args:
+            node: The call.
+            function: The registry entry being called.
+            run: The evaluation state.
+
+        Returns:
+            The arguments to hand the function.
+        """
+        # **The lazy positions are simply not evaluated.** No side table, no synthetic names, no
+        # rewritten tree: the function said which of its arguments are expressions, so those
+        # arrive as a `LazyExpr` over the original subtree and everything else arrives as a value.
+        arguments = [
+            LazyExpr(self, argument, run) if index in function.lazy else self._eval(argument, run)
+            for index, argument in enumerate(node.args)
+        ]
+        # **A call is charged for what it reads, and below for what it produces.** Without the
+        # first half the counter is blind to a function that walks its input in C without
+        # evaluating anything per item, and the blindness is not small: measured, `sum` over
+        # 200,000 integers is charged **three steps for 1.7 milliseconds**, which is 2,000 times
+        # less per unit of work than an expression evaluated per item. `rows | map(sum(nums))`
+        # therefore bought about eighteen minutes of work from the default budget, which is
+        # precisely the denial of service the budget exists to stop.
+        #
+        # Charging the eager arguments fixes it uniformly and needs nothing declared per
+        # function. A `LazyExpr` has no length, so lazy positions contribute nothing. The
+        # over-charge is on the constant-time accessors, `first` and `len` on a large list, and
+        # it is 0.05% of the default budget: conservative in the safe direction and far cheaper
+        # than a per-function exemption to get wrong.
+        for argument in arguments:
+            charge = size_charge(argument)
+            if charge:
+                _spend(run, node, charge)
+        return arguments
 
     # Node type to handler, built inside the class body so the handlers are plain names here
     # rather than attribute lookups on a class that does not exist yet. The values are unbound

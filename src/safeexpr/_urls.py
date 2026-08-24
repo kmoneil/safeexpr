@@ -107,7 +107,7 @@ def _url_query(value: Any) -> dict[str, str]:
 
 
 URLS: dict[str, Function] = {
-    "url_host": Function("url_host", _url_host, arity=(1, 1), cost=2),
-    "url_path": Function("url_path", _url_path, arity=(1, 1), cost=2),
-    "url_query": Function("url_query", _url_query, arity=(1, 1), cost=2),
+    "url_host": Function("url_host", _url_host, arity=(1, 1)),
+    "url_path": Function("url_path", _url_path, arity=(1, 1)),
+    "url_query": Function("url_query", _url_query, arity=(1, 1)),
 }

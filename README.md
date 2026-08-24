@@ -101,6 +101,28 @@ not exist.
 The `Development Status :: 3 - Alpha` classifier stays until the escape corpus ships and passes
 on every supported interpreter, because that corpus is the security claim.
 
+## Limits
+
+Every limit is set from a measurement at **ten times observed need or more**, and
+`python scripts/limits.py` reproduces the table on your own machine. `tests/test_limits.py`
+re-checks the ratios, so a number that drifts out of its own rule fails the suite rather than
+sitting in a comment.
+
+| Limit | Value | Measured need | Ratio |
+| --- | --- | --- | --- |
+| Source length | 2,048 bytes | set by 3.11's parser, not by need | |
+| Expression nesting | 125 | 12, a tangled but real rule | 10.4x |
+| Data nesting | 1,000 | 7, a nested configuration tree | 143x |
+| Result size | 1,048,576 elements | 100,000, a map over 10⁵ items | 10.5x |
+| Step budget | 6,000,000 | 538,433, the heaviest use case at 10⁵ items | 11.1x |
+| Power result | 1 MiB of integer | set by measured time; no rule needs large powers | |
+
+**Reference timing.** The five canonical use cases at 100,000 items: the heaviest is the pipeline
+at 538,433 steps in 153 ms, and the rate is **4.0 to 5.4 steps per item**, stable across 10³, 10⁴
+and 10⁵. That rate is what makes a budget expressible in items rather than in nodes: at the
+originally proposed 100,000 steps it would have covered about twenty thousand items and raised on
+a hundred thousand.
+
 ## Threat model
 
 > Expressions come from semi-trusted config authors, not anonymous internet users. The sandbox is
