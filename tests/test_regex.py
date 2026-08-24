@@ -17,6 +17,7 @@ import re
 import statistics
 import time
 import warnings
+from collections.abc import Callable
 from typing import Any
 
 import pytest
@@ -93,6 +94,33 @@ ATTACKS = [
     "foo" * 7 + "!",
     "bar" * 7 + "!",
 ]
+
+
+def fastest(run: Callable[[], object], samples: int = 7) -> float:
+    """The shortest of several timings of `run`.
+
+    **The minimum, not the mean or the median, and that is the point.** Interference only ever
+    adds time: a scheduler preemption, a garbage collection, another process on the machine.
+    None of them can make an operation finish sooner, so the smallest observation is the closest
+    thing to the operation's own cost and is robust to a loaded box by construction.
+
+    A wall-clock assertion on a single sample is a coin toss with very good odds, and a suite
+    with hundreds of runs will eventually lose one. This suite saw exactly that: a single
+    unreproducible failure on 3.14 while the machine was busy building another environment.
+
+    Args:
+        run: The operation to time.
+        samples: How many times to run it.
+
+    Returns:
+        The shortest elapsed time, in seconds.
+    """
+    best = float("inf")
+    for _ in range(samples):
+        started = time.perf_counter()
+        run()
+        best = min(best, time.perf_counter() - started)
+    return best
 
 
 @pytest.fixture
@@ -217,9 +245,7 @@ class TestTheRuleThatWasMeasuredAndRemoved:
     def test_a_repeat_over_an_empty_alternative_is_accepted_and_is_fast(self, pattern: str) -> None:
         assert check(pattern) is None
         compiled = re.compile(pattern)
-        started = time.perf_counter()
-        compiled.search("ab" * 11 + "!")
-        assert time.perf_counter() - started < 0.01
+        assert fastest(lambda: compiled.search("ab" * 11 + "!")) < 0.01
 
     @pytest.mark.parametrize("pattern", [r"(a|a?)*$", r"((a)*)*$"])
     def test_the_slow_ones_it_flagged_are_refused_for_nesting_anyway(self, pattern: str) -> None:
@@ -246,11 +272,7 @@ class TestNoAcceptedPatternCanBeMadeSlow:
     @pytest.mark.parametrize("pattern", BENIGN)
     def test_it_stays_under_the_ceiling_on_every_attack(self, pattern: str) -> None:
         compiled = re.compile(pattern)
-        worst = 0.0
-        for attack in ATTACKS:
-            started = time.perf_counter()
-            compiled.search(attack)
-            worst = max(worst, time.perf_counter() - started)
+        worst = max(fastest(lambda text=text: compiled.search(text)) for text in ATTACKS)  # type: ignore[misc]
         # Benign patterns measure in microseconds, so a tenth of a second is roughly four orders
         # of magnitude of headroom. Loose enough not to flake on a loaded machine, tight enough
         # that anything actually backtracking blows straight through it.
@@ -259,12 +281,10 @@ class TestNoAcceptedPatternCanBeMadeSlow:
     @staticmethod
     def _worst(pattern: str, length: int) -> float:
         compiled = re.compile(pattern)
-        worst = 0.0
-        for filler in ("a", "x", "1", " "):
-            started = time.perf_counter()
-            compiled.search(filler * length + "!")
-            worst = max(worst, time.perf_counter() - started)
-        return worst
+        return max(
+            fastest(lambda filler=filler: compiled.search(filler * length + "!"), samples=3)  # type: ignore[misc]
+            for filler in ("a", "x", "1", " ")
+        )
 
     @pytest.mark.parametrize("pattern", CATASTROPHIC)
     def test_the_refused_ones_would_have_been_slow(self, pattern: str) -> None:

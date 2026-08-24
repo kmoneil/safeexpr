@@ -173,11 +173,19 @@ class TestThePowerCapIsOnTheResultNotTheExponent:
             evaluate("(10 ** 100) ** 100000")
 
     def test_the_refusal_is_fast(self) -> None:
-        """A guard that computes the value before rejecting it is not a guard."""
-        start = time.perf_counter()
-        with pytest.raises(EvaluationError):
-            evaluate("(10 ** 1000) ** 3000000")
-        assert time.perf_counter() - start < 1.0
+        """A guard that computes the value before rejecting it is not a guard.
+
+        Timed as the shortest of five, because interference only ever adds time and a single
+        wall-clock sample on a busy machine is a coin toss. Computing the value would be slow in
+        the minimum too.
+        """
+        best = float("inf")
+        for _ in range(5):
+            start = time.perf_counter()
+            with pytest.raises(EvaluationError):
+                evaluate("(10 ** 1000) ** 3000000")
+            best = min(best, time.perf_counter() - start)
+        assert best < 1.0
 
     def test_ordinary_powers_still_work(self) -> None:
         assert evaluate("2 ** 10") == 1024
@@ -426,11 +434,21 @@ class TestFieldAccessWithoutAWrapper:
         100k-element list is never walked, because nothing asked for it.
         """
         context = {"big": list(range(100_000)), "flag": True}
-        start = time.perf_counter()
-        for _ in range(200):
-            assert evaluate("flag", context) is True
-        elapsed = time.perf_counter() - start
-        assert elapsed < 0.5, f"200 evaluations took {elapsed:.3f}s; is something copying `big`?"
+
+        def two_hundred_evaluations() -> None:
+            for _ in range(200):
+                assert evaluate("flag", context) is True
+
+        # The shortest of five, not a single sample. Interference only ever adds time, so the
+        # minimum is the closest thing to the operation's own cost and cannot be inflated by a
+        # busy machine. The claim is about whether the context is copied, and copying a
+        # 100,000-element list would show in the minimum too.
+        best = float("inf")
+        for _ in range(5):
+            started = time.perf_counter()
+            two_hundred_evaluations()
+            best = min(best, time.perf_counter() - started)
+        assert best < 0.5, f"200 evaluations took {best:.3f}s; is something copying `big`?"
 
     def test_a_self_referential_context_is_harmless(self) -> None:
         """A wrapper that recursed on the way in would hang here."""

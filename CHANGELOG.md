@@ -65,6 +65,13 @@ in; the remaining function tiers and the evaluation budget are not.
   corpus of nothing but rejections would pass against a sandbox that refuses everything.
 
 ### Fixed
+- **Every wall-clock assertion in the suite now times the minimum of several samples** rather
+  than one. Interference only ever adds time, so the smallest observation is the closest thing to
+  an operation's own cost and cannot be inflated by a busy machine, while a genuinely slow
+  operation is slow in the minimum too. Prompted by a single unreproducible failure on 3.14 while
+  the machine was building another environment: thirteen further runs were clean and the test was
+  never identified, so the class of assertion most likely responsible was hardened rather than a
+  guess being presented as a fix.
 - **A regular expression the engine warns about was reported as a bug in this package.** Under
   `-W error`, which is ordinary in CI and is this project's own pytest setting, a pattern like
   `[a--b]` raised `FutureWarning` from inside the pattern gate's parse, reaching the boundary as
@@ -134,6 +141,19 @@ in; the remaining function tiers and the evaluation budget are not.
   declared and not yet charged.
 - `FunctionError`, for a registry function to say what is wrong with the values it was given. It
   carries a message and nothing else, and the evaluator adds the position.
+- **Property tests for the transform layer**, over a generator that produces pipes inside lazy
+  arguments, calls inside calls, and rewrites inside containers and subscripts, rather than the
+  flat chains the pipe work shipped with. Idempotence, position preservation, byte-identity when
+  nothing is registered, and independence from the context all hold over those shapes.
+  - **The tree that is validated is the tree that is evaluated**, asserted by watching both calls
+    rather than by checking each function returns its argument. `validate(tree) is tree` and
+    `transform(tree) is tree` are each true on their own and neither says this. Making `evaluate`
+    validate a deep copy leaves the existing F8 test passing and fails only the new property,
+    which is the gap it was written for.
+  - `_` scoping is checked at generated nesting depths up to eight: the outermost item stays
+    reachable, reaching one level past the nesting is refused, and `_` means the innermost
+    binding whatever the depth.
+  - A coverage assertion keeps the generator honest, as with the differential and fuzzing work.
 - **An audit-hook tripwire.** `scripts/audit_fuzz.py` fuzzes the evaluator with
   `sys.addaudithook` watching and fails if any audit event fires during evaluation beyond this
   package parsing its own source. Every other test here checks something somebody thought of;
