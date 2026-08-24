@@ -1,6 +1,12 @@
 # Changelog
 
-All notable changes to this project are documented here.
+All notable changes to this project are documented here. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
+[Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+**The headings are parsed, not just read.** `release.yml` refuses a tag whose version has no
+`## <version>` section here, and builds the GitHub release notes from that section, so renaming
+`## Unreleased` and dating it is part of cutting a release rather than a courtesy.
 
 ## Unreleased
 
@@ -58,13 +64,249 @@ in; the remaining function tiers and the evaluation budget are not.
   - Field access needs no wrapper type, so a large context costs nothing at evaluation entry and
     a self-referential one is harmless.
 
-- **Escape corpus.** `corpus/escapes-v1.jsonl` holds 72 entries covering every failure class
+- **Escape corpus.** `corpus/escapes-v1.jsonl` holds 100 entries covering every failure class
   this package claims to close, each carrying its provenance and the stage at which it must be
   rejected. `python scripts/lanes.py corpus` runs it; CI runs it on every supported interpreter
-  as a job of its own. Nine of the entries are controls that must still evaluate, because a
+  as a job of its own. Seventeen of the entries are controls that must still evaluate, because a
   corpus of nothing but rejections would pass against a sandbox that refuses everything.
 
+- **`.github/workflows/release.yml`**, adapted from `ssrfguard`, which has already been through
+  a PyPI release. Tag-triggered, and the shape is the point:
+
+  - **No long-lived credential.** Trusted publishing mints a short-lived OIDC token for this
+    repository, this workflow and this environment. `id-token: write` is granted to the publish
+    job alone, and `tests/test_lanes.py` fails if a repository secret ever appears.
+  - **Gate before build.** Publishing is the one irreversible step here, since a version number
+    on PyPI cannot be reused even after a delete, so seven of the eight lanes run against the
+    tagged tree first. `zero-deps` and `sdist` matter most at that moment: they are the only ones
+    that read the artifact a user downloads rather than the tree it came from.
+  - **Three refusals that name the actual mistake**: a tag disagreeing with `__version__`, a
+    changelog with no section for the version, and a security policy still saying nothing has
+    been released. Each would otherwise surface as an upload failure after everything passed,
+    which reads as an infrastructure problem.
+  - **Build once, publish that artifact**, with `--no-build-isolation` over a synced `build`
+    group so the backend that produces the artifact comes from `uv.lock` like everything else.
+    That group has existed since the scaffold and nothing used it until now.
+  - **A CycloneDX SBOM, nearly empty, which is the whole point:** the zero-dependency claim in a
+    form a procurement process can read without taking our word for it. Generated from the built
+    wheel rather than from `pyproject.toml`, so it describes the artifact.
+  - **A GitHub release after the upload rather than before it**, with notes taken from the
+    changelog section rather than written a second time.
+
+  Five tests pin the parts that a default would otherwise keep true until the day it did not:
+  actions SHA-pinned across both workflows, `attestations: true`, `digest-mismatch: error`,
+  `--no-build-isolation`, no repository secret, and exactly one job holding each write
+  permission. They strip comments before searching, because the file argues at length for the
+  very strings they look for.
+
+- **A `Provenance` section in `SECURITY.md`**, saying what a downloader can verify: a signed
+  PEP 740 attestation naming the workflow that built the artifact, and the SBOM. Both are
+  asserted rather than promised, so the paragraph cannot quietly stop being true.
+
+- **The changelog format is now a contract rather than a habit.** `release.yml` refuses a tag
+  whose version has no `## <version>` section and builds the release notes from it, so the header
+  says so and `tests/test_packaging.py` accepts either a heading for the packaged version or
+  `## Unreleased`, which is the honest answer before the first tag.
+
+- **The version and the security policy's support window are tied together.** `SECURITY.md` says
+  there is no released version, which is true and will stop being true, and a support window
+  describing a world that no longer exists is worse than none: it tells a reporter their version
+  is unsupported when it is the only supported one.
+
+  The sentence is now keyed to `__version__` rather than to somebody remembering. Bumping to a
+  final release **fails the suite** until the policy is rewritten, which is what makes cutting a
+  release mechanical instead of a checklist. Verified by bumping to `0.1.0` and watching it fail.
+  The same test asserts the version is one PyPI will accept, because a version rejected at upload
+  is found in the most expensive place.
+
+- **An `sdist` lane, which proves the distribution rather than the package.** `pyproject.toml`
+  ships `tests/` and `corpus/` on purpose, and says why: downstream packagers rebuild from the
+  sdist and run this suite to validate the build, and for this package that matters more than
+  usual, because the corpus is the security argument.
+
+  That was a promise about an artifact nothing here ever ran. `python scripts/lanes.py sdist`
+  builds the sdist, builds the wheel **from** it, installs that wheel into an interpreter holding
+  only a test runner, and runs the shipped suite from the unpacked tree. **The isolation is the
+  lane**, the same reason `zero-deps` has one: a checkout has `.github/`, `.git`, `uv.lock` and a
+  synced environment, and a distribution has none of them, so passing here says nothing about
+  passing there.
+
+  It earned itself on the first run. See the fix below.
+
+- **Thread safety is a contract, not an observation.** One `Evaluator` is safe to share between
+  threads: immutable after construction, with the registry and permitted attribute types **copied**
+  rather than held, `__slots__` so nothing can be attached later, and every piece of
+  per-evaluation state (the step counter and the `_` scope stack included) in a call-scoped
+  object. The budget is therefore per call, so two threads never spend each other's.
+
+  Asserted rather than asserted-to: five concurrency tests on one shared evaluator, including the
+  one the contract exists for, where a thread is run to budget exhaustion beside others that must
+  all still succeed. **No mutable module-level state**, enforced structurally by a scan that reads
+  every shipped module for a module-level container something writes to after import.
+
+  The scan found exactly one, and it is allowlisted with a measured argument rather than removed:
+  the bounded cache of compiled regular-expression patterns. Compiling is a pure function of the
+  pattern string, and `matches` is charged its declared cost whether the pattern was compiled or
+  fetched, **so the cache is invisible to the budget**: 13 steps on a cold cache and 13 on a warm
+  one. The language has no clock, so nothing inside an expression can observe it at all.
+
+- **No string interpolation in v1, and the argument is measured.** f-strings, and t-strings on
+  3.14, stay off the node allowlist. The reason is sharper than "the same shape as `str.format`":
+  `f"{obj}"` calls that object's `__format__`, `f"{obj!r}"` its `__repr__`, `f"{obj!s}"` its
+  `__str__`, and `f"{obj:{spec}}"` hands its `__format__` a spec **computed at runtime**. Four
+  ways to run a context object's own code, on values `str()` already refuses to convert for
+  exactly that reason, in a syntax a static check reads as one node.
+
+  All four parse to the same `JoinedStr` and `FormattedValue`, so one allowlist entry closes every
+  one of them. Two corpus entries record that the variants were considered. If interpolation is
+  ever allowed, the entries proving each conversion unreachable land **in the same change**.
+
+- **The closed allowlist is now proven by construction rather than by example.** F7's claim is
+  that grammar nobody has reviewed is rejected, and the evidence was two hand-written t-string
+  corpus entries: one case, the one that already happened. A new test enumerates **every
+  `ast.expr` subclass the running interpreter has**, asserts the allowed set is exactly the
+  fourteen the language is made of, and constructs an instance of every other one to assert it is
+  rejected. On 3.14 that covers `TemplateStr` and `Interpolation` without naming either, and it
+  fails on the day a future Python adds an expression node. Proven non-vacuous by mutation: adding
+  `ast.Lambda` to the allowlist fails two of its tests.
+
+- **README pass.** An install section, a **non-goals** section (not Turing-complete, no I/O ever,
+  not CEL and not CEL-compatible, no custom grammar ever), an **alternatives** table with the
+  figures checked against PyPI metadata on 2026-08-23, **what happens past every limit** with the
+  error type for each, and **the supported scale stated plainly**: ten times a hundred thousand
+  items on the heaviest of the five canonical use cases, past which you get
+  `BudgetExceededError` rather than a slow answer.
+
+  The configuration surface is three constructor arguments and the README now says so, with
+  `attribute_types` given its own paragraph rather than a table row: it opts a type back into
+  `getattr`, which is where essentially every published Python sandbox escape has started, and
+  listing it beside `budget` without saying so would have been the most expensive omission in the
+  file. `tests/test_readme.py` reads the three names off `Evaluator.__init__`'s own signature.
+
+- **A disclosure two documents disagreed about, now written down.** `RESEARCH-FINDINGS` said a
+  type name in an error message is something R8 forbids; `_registry.describe_type` returns exactly
+  that and argues the case in its docstring. Both shipped. Settled in favour of the code and
+  documented: **an error names the type of a value it could not work with**, never a value and
+  never a `repr`. A name is a string rather than a class object, so nothing about it is climbable,
+  and the alternative is an error that cannot say what went wrong. It is now a bullet in
+  `THREAT-MODEL.md`'s "What this does not bound" and a paragraph in the README.
+
+- **A poisoned-value sweep across every refusal the language can produce.**
+  `TestNothingRidesOutOnAnyRefusal` builds one expression per registry function at its declared
+  minimum arity, plus thirty-two operator and syntax cases, and evaluates each against a value
+  whose every dunder raises. Each refusal is therefore produced by a handler holding the caller's
+  object live, which is the F9 precondition on purpose, seventy-four times over. Every one is
+  asserted to carry no `__cause__`, no `__context__`, no `__notes__`, no secret and no `repr`.
+
+  **Zero leaks.** The sweep is generated from the registry rather than listed, so a tier added
+  later is swept the day it lands, and it is broad where the corpus is deep: the corpus asserts
+  `__context__` per entry and is exactly as wide as its entries, and no corpus entry calls
+  `slugify` with an object that refuses conversion.
+
+- **`SECURITY.md`**, the disclosure policy, published before it is needed rather than improvised
+  afterwards. Private reporting through GitHub's private vulnerability reporting or by email, and
+  **no public issue for a suspected escape**, because a public report on a sandbox is a working
+  exploit published at the one moment no upgrade exists. What is in scope, what is triaged on the
+  facts, and what is documented rather than accidental are all listed, and every accepted escape
+  ships as a new release with a CVE requested, the reporter credited, and a corpus entry added in
+  the same change.
+
+  Two things it says that a template would not. **Which sentence wins:** the threat-model
+  statement and the standing commitment read as contradicting each other, and "semi-trusted" being
+  handed back to a reporter as a reason to close their report is the exact failure this policy
+  exists to prevent, so the policy says outright that it is not a reason to downgrade an escape.
+  And **an honest support window:** there is no released version, so a version table would be
+  fiction.
+
+  `tests/test_security_policy.py` holds it to the parts a test can hold: the four workflow steps
+  by name, a private channel that points at *this* repository, and the three files that
+  `pyproject.toml`'s own comment says "move together" about the release status. That comment is a
+  test now.
+
+- **`tests/test_readme.py`**, which checks the README's published facts against the code that
+  makes them true. Every value in the limits table against the constant in force, the
+  reserved-names block against `Evaluator.function_names`, the function and tier counts computed
+  from the registry rather than typed, the budget and size-charge numbers, the supported-version
+  range against the classifiers, and the three front-page expressions evaluated rather than
+  admired. It also runs the doctests in the shipped modules, which `testpaths = ["tests"]` meant
+  nothing ever did.
+
+  The reserved-names check earned itself immediately by pinning a distinction that looks like a
+  defect and is not: the block lists **42** names against a registry of **41**, because `bitor` is
+  a builtin rather than a tier entry.
+
+- **`THREAT-MODEL.md`**, the failure-mode catalog the corpus was built to support. One section
+  per class F1 to F9, each with the mechanism, the advisories where it has broken a real
+  project, why it is unreachable here, and **the corpus entries proving it**. A reviewer can
+  trace all nine classes to passing tests without reading the source, which is the document's
+  whole job.
+
+  **It is checked against the corpus rather than trusted.** `tests/test_threat_model.py` asserts
+  the entry list in each section equals the corpus's entries for that class, in both directions:
+  a citation with no entry behind it is a dead reference, and an entry with no citation is
+  coverage the catalog does not claim. The per-class counts in its summary table are asserted
+  too, and every advisory identifier in the body must appear in the document's own sources
+  table. A corpus entry renamed and not re-cited fails the suite.
+
+  Three things the document states plainly rather than rounding up: the step budget does not
+  bound regular-expression time, memory amplification is mitigated and not eliminated, and F4 is
+  bounded and not eliminated. An often-repeated claim that simpleeval fixed a sandbox escape via
+  generators and `_frame` methods could not be verified against OSV, so it is not cited and F6
+  rests on RestrictedPython's CVE-2023-37271 alone.
+
 ### Fixed
+- **The shipped test suite did not pass from the shipped source distribution.**
+  `tests/test_lanes.py` reads `.github/workflows/ci.yml` to assert every lane is wired into CI,
+  and `.github/` is deliberately not in the sdist, because CI plumbing is not the product.
+  So a downstream packager doing exactly what `pyproject.toml` invites them to do got a
+  `FileNotFoundError` that had nothing to do with the package.
+
+  Fixed the way round that keeps both promises: the check skips outside a checkout and says so in
+  its skip reason, rather than the workflow being added to the distribution to keep a test green.
+  A second test asserts the workflow **is** present in a checkout, identified by `.git`, so the
+  skip cannot quietly cover somebody deleting it. Found by the new `sdist` lane, on its first run.
+
+- **Four planning-card ids had leaked into `tests/`, which ships.** Working notes live outside the
+  distribution and always have; what escaped was references to them, written into test docstrings
+  while working from a card. In a published sdist that is a pointer to a document the reader
+  cannot open. Rewritten to say what the test checks, and `tests/test_packaging.py` now scans
+  every shipped file for a reference to a private directory or a card id.
+
+  Two details that took a second attempt. The scan assembles its own patterns from parts, so
+  **this file is covered by its own check** rather than exempted, which is the blind spot a check
+  like this reliably grows. And a plain substring search for one of the private names finds it
+  inside `test_a_clean_error_reports_nothing`, so the pattern requires word boundaries: the first
+  version reported four test names and nothing real.
+
+- **A timing measurement took the median where the rest of the suite takes the minimum**, and it
+  flaked one run in five. `scripts/limits.py`'s `seconds_for` was the one wall-clock measurement
+  the previous hardening sweep did not reach, because it lives in `scripts/` rather than `tests/`,
+  and `test_the_aggregates_are_within_a_small_factor` failed intermittently with nothing in
+  `src/` changed. Interference can only add time and never remove it, so it is the minimum of
+  five samples now: **zero failures in fifteen runs**, against one in five before. The published
+  reference timing is unchanged at 152.6 ms for the pipeline at 100,000 items, so the number in
+  the README still holds.
+- **A fourth instance of F9, in the one handler no corpus entry can reach.**
+  `_regex._compiled` guards `re.compile` against a warning the pattern gate did not already
+  refuse, and it scrubbed with `raise failure from None`, which is the exact spelling `_errors`
+  exists to warn against. Measured: the refusal carried `__context__` to the warning, a warning's
+  `args` quote the pattern, and the pattern can come from the host's data.
+
+  **Three defences and the union of them still had a hole.** The gate refuses those patterns
+  first, so no test and no corpus entry ever ran that handler. `_eval._call` re-wraps a
+  `FunctionError` into a fresh error raised outside its own handler, so nothing reached a host.
+  And the corpus asserts `__context__` on every *entry*, which is why it found the first three
+  instances of this class and structurally could not find this one. Relying on a downstream layer
+  to scrub is what the decision record forbids, which is why this is a defect rather than a
+  tidy-up.
+
+  Fixed to the package's own convention, and pinned two ways. A regression test forces the branch
+  with a compile that warns. And `TestNoRaiseSiteScrubsInsideItsHandler` **reads the source rather
+  than running it**: every `raise` lexically inside an `except` block in `src/` must be a bare
+  re-raise, which needs no path to be reachable to enforce. Both were confirmed failing against
+  the pre-fix source. `tests/test_error_boundary.py` opened by promising that a refactor
+  reintroducing `raise ... from None` "fails here rather than in somebody's incident review", and
+  nothing made that true until now.
 - **Every wall-clock assertion in the suite now times the minimum of several samples** rather
   than one. Interference only ever adds time, so the smallest observation is the closest thing to
   an operation's own cost and cannot be inflated by a busy machine, while a genuinely slow

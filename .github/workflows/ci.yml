@@ -71,6 +71,30 @@ jobs:
       - run: uv run --no-project --python 3.13 python scripts/lanes.py zero-deps
 
   # ---------------------------------------------------------------------------
+  # The lane that proves the *distribution* claim, as opposed to the package claim above.
+  #
+  # `tests/` and `corpus/` ship in the sdist deliberately, because downstream packagers rebuild
+  # from it and run this suite to validate the build, and for this package that matters more than
+  # usual: the corpus is the security argument, and a distribution carrying the code without the
+  # tests that prove it is shipping an unverifiable claim.
+  #
+  # That is a promise about an artifact nothing else here ever runs. A checkout has `.github/`,
+  # `.git`, `uv.lock` and a synced environment; the distribution has none of them. This builds the
+  # sdist, builds the wheel *from* it, installs that wheel into an interpreter holding only a test
+  # runner, and runs the shipped suite from the unpacked tree.
+  # ---------------------------------------------------------------------------
+  sdist:
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+      - run: uv python install
+      - run: uv run --no-project --python 3.13 python scripts/lanes.py sdist
+
+  # ---------------------------------------------------------------------------
   # The unit suite on the development interpreter, on both platforms.
   #
   # macOS is here rather than for completeness. This package's limits are measured in interpreter

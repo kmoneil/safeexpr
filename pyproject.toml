@@ -126,6 +126,7 @@ include = [
   "/scripts",
   "/README.md",
   "/CHANGELOG.md",
+  "/THREAT-MODEL.md",
   "/SECURITY.md",
   "/LICENSE",
   "/pyproject.toml",
