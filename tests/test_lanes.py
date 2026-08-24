@@ -325,28 +325,32 @@ def test_regression_lanes_the_minimal_rows_still_collect_nothing_in_benchmarks()
     rows for a reason that has nothing to do with the package.
     """
     conftest = ROOT / "tests" / "benchmarks" / "conftest.py"
-    namespace: dict[str, object] = {"__file__": str(conftest)}
     source = conftest.read_text(encoding="utf-8")
 
-    class _NothingInstalled:
-        @staticmethod
-        def find_spec(name: str) -> None:
-            return None
+    def ignored_when(installed: bool) -> object:
+        """What that conftest ignores, with `find_spec` reporting the plugins present or absent.
 
-    real = importlib.util
-    try:
-        importlib.util = _NothingInstalled  # type: ignore[assignment]
-        exec(compile(source, str(conftest), "exec"), namespace)  # noqa: S102
-    finally:
-        importlib.util = real  # type: ignore[assignment]
+        **Both halves are faked, including the present one.** This test runs in every lane, and the
+        lanes disagree about whether the plugins are there: `fast` and `compat` do not install the
+        measure group, so asking the real environment would assert one thing on one runner and the
+        opposite on another. What is being checked is the conftest's decision, not the machine.
+        """
+        namespace: dict[str, object] = {"__file__": str(conftest)}
+        real = importlib.util
+        try:
+            importlib.util = type(  # type: ignore[assignment]
+                "_Reporting",
+                (),
+                {"find_spec": staticmethod(lambda name: object() if installed else None)},
+            )
+            exec(compile(source, str(conftest), "exec"), namespace)  # noqa: S102
+        finally:
+            importlib.util = real  # type: ignore[assignment]
+        return namespace["collect_ignore_glob"]
 
-    ignored = namespace["collect_ignore_glob"]
-    assert ignored == ["test_*_bench.py", "test_*_memory.py"], ignored
-
-    # And with them present, nothing is ignored, or the lane that needs them would collect nothing.
-    namespace = {"__file__": str(conftest)}
-    exec(compile(source, str(conftest), "exec"), namespace)  # noqa: S102
-    assert namespace["collect_ignore_glob"] == []
+    assert ignored_when(installed=False) == ["test_*_bench.py", "test_*_memory.py"]
+    # And with them present nothing is ignored, or the lane that needs them collects nothing.
+    assert ignored_when(installed=True) == []
 
 
 def test_regression_lanes_the_measure_group_is_not_a_default_group() -> None:
