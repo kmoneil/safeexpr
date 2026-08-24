@@ -32,6 +32,7 @@ import pytest
 from safeexpr import standard_registry
 from safeexpr._collections import COLLECTIONS
 from safeexpr._dates import DATES
+from safeexpr._regex import REGEX
 from safeexpr._strings import STRINGS
 from safeexpr._types import TYPES
 from safeexpr._urls import URLS
@@ -52,6 +53,11 @@ TIER_IMPORTS: dict[str, frozenset[str]] = {
     "safeexpr._strings": frozenset(
         {"__future__", "unicodedata", "typing", "._registry", "._guards"}
     ),
+    # `sre_parse` is the pre-3.11 spelling of `re._parser` and is the documented fallback if the
+    # private module ever moves again. Listed rather than tolerated.
+    "safeexpr._regex": frozenset(
+        {"__future__", "re", "sre_parse", "typing", "._registry", "._guards"}
+    ),
     "safeexpr._dates": frozenset({"__future__", "datetime", "typing", "._registry", "._guards"}),
     "safeexpr._urls": frozenset({"__future__", "urllib.parse", "typing", "._registry", "._guards"}),
 }
@@ -61,11 +67,19 @@ TIER_MODULES = tuple(name for name in TIER_IMPORTS if name != "safeexpr._guards"
 
 # The names the card bans, plus the climb they lead to. Anything that reads an attribute, a name
 # or a type at runtime, because that is precisely what a static AST allowlist cannot see.
-BANNED = frozenset(
+#
+# **Split by how the thing is actually reached, which is more precise than one flat set.** The
+# first group are builtins, invoked by bare name; the second are attributes, reached through a
+# value. That distinction is not a loophole, it is the rule stated correctly: `compile` as a bare
+# name is the builtin that turns text into code, and `re.compile` is a different function that
+# turns text into a regular expression and reflects on nothing. A single set conflated them and
+# would have forced either an exemption for one module or the deletion of `compile` from the ban
+# entirely, and both are worse than saying which one is meant.
+#
+# `format` stays in the attribute group and not the name group, because the F1 shape is
+# `"{0.__class__}".format(x)`: a method on a value, never a bare call.
+BANNED_NAMES = frozenset(
     {
-        "format",
-        "format_map",
-        "Formatter",
         "getattr",
         "setattr",
         "delattr",
@@ -79,6 +93,13 @@ BANNED = frozenset(
         "globals",
         "locals",
         "__import__",
+    }
+)
+BANNED_ATTRIBUTES = frozenset(
+    {
+        "format",
+        "format_map",
+        "Formatter",
         "__getattribute__",
         "__dict__",
         "__class__",
@@ -108,15 +129,22 @@ def _imports(tree: ast.Module) -> set[str]:
 
 class TestNoTierFunctionPerformsRuntimeReflection:
     @pytest.mark.parametrize("dotted", TIER_IMPORTS)
-    def test_no_banned_name_appears_anywhere_in_the_module(self, dotted: str) -> None:
-        used = {
-            node.id if isinstance(node, ast.Name) else node.attr
-            for node in ast.walk(_tree(dotted))
-            if isinstance(node, (ast.Name, ast.Attribute))
-        }
-        assert not (used & BANNED), (
-            f"{dotted} references {sorted(used & BANNED)}. A registry function that reflects at "
+    def test_no_banned_builtin_is_called_by_name(self, dotted: str) -> None:
+        tree = _tree(dotted)
+        used = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
+        assert not (used & BANNED_NAMES), (
+            f"{dotted} calls {sorted(used & BANNED_NAMES)}. A registry function that reflects at "
             f"runtime reopens F1, which no static check on the expression can see."
+        )
+
+    @pytest.mark.parametrize("dotted", TIER_IMPORTS)
+    def test_no_banned_attribute_is_reached_through_a_value(self, dotted: str) -> None:
+        tree = _tree(dotted)
+        used = {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)}
+        assert not (used & BANNED_ATTRIBUTES), (
+            f"{dotted} reads {sorted(used & BANNED_ATTRIBUTES)} off a value, which is the F1 "
+            f'climb: `"{{0.__class__}}".format(x)` reflects from inside a format string and no '
+            f"AST check reads a format string."
         )
 
     @pytest.mark.parametrize("dotted", TIER_IMPORTS)
@@ -179,6 +207,7 @@ class TestTheTiersAgreeWithEachOther:
             "collections": COLLECTIONS,
             "types": TYPES,
             "strings": STRINGS,
+            "regex": REGEX,
             "dates": DATES,
             "urls": URLS,
         }
@@ -192,7 +221,7 @@ class TestTheTiersAgreeWithEachOther:
         assert not clashes, f"tiers disagree about a name: {clashes}"
 
     def test_the_standard_registry_is_exactly_the_union_of_the_tiers(self) -> None:
-        union = set(COLLECTIONS) | set(TYPES) | set(STRINGS) | set(DATES) | set(URLS)
+        union = set(COLLECTIONS) | set(TYPES) | set(STRINGS) | set(REGEX) | set(DATES) | set(URLS)
         assert set(standard_registry()) == union
 
     def test_every_entry_is_registered_under_its_own_name(self) -> None:

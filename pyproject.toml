@@ -250,6 +250,7 @@ ban-relative-imports = "parents"
 "src/safeexpr/_strings.py" = ["ANN401"]
 "src/safeexpr/_dates.py" = ["ANN401"]
 "src/safeexpr/_urls.py" = ["ANN401"]
+"src/safeexpr/_regex.py" = ["ANN401"]
 "tests/**" = ["D", "ANN", "S101", "S603", "S607", "PLR2004", "T20"]
 
 # ---------------------------------------------------------------------------

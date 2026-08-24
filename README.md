@@ -46,12 +46,19 @@ counter and not a timer, so it needs no `signal`, no thread and no executor, giv
 answer on every platform and inside any thread, and bounds a filter over a context of any size.
 Set it with `Evaluator(budget=...)`; the default is six million steps.
 
-Forty functions across five tiers: collections, types, strings, dates and URL. `matches` is the
-one still to come, because regular expressions need a static ReDoS gate rather than an
-input-length cap. Two things worth knowing before you reach for them: `str` converts primitives
-and refuses arbitrary objects, because converting one would run that object's own code to produce
-the text, and `slugify` is ASCII in core, so a script with no ASCII form is dropped rather than
-transliterated.
+Forty-one functions across six tiers: collections, types, strings, regex, dates and URL. Three
+things worth knowing before you reach for them: `str` converts primitives and refuses arbitrary
+objects, because converting one would run that object's own code to produce the text; `slugify`
+is ASCII in core, so a script with no ASCII form is dropped rather than transliterated; and
+`matches` refuses patterns that can backtrack catastrophically.
+
+That last one is a real restriction, so it is worth stating plainly. `^(a+)+$` against a
+29-character input takes seven seconds, so no input-length cap helps and the pattern itself is
+refused before it compiles. A pattern is refused if it nests one backtrackable repeat inside
+another, or repeats an alternation whose branches match the same text. **Atomic groups and
+possessive quantifiers reset that**, so `^(?>a+)+$` and `^(a++)+$` are accepted where `^(a+)+$`
+is not; both are available on every supported version, which is 3.11 and later. The gate is
+deliberately conservative and refuses a few patterns that happen to be fast.
 
 The `CHANGELOG.md` "Known limitations" section is kept current with exactly what does and does
 not exist.

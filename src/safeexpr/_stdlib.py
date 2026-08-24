@@ -1,8 +1,7 @@
 r"""The standard registry: every tier, assembled.
 
 One place that knows which tiers exist, so a host writes `Evaluator(registry=standard_registry())`
-once and keeps working as tiers are added. Today that is collections, types, strings, dates and
-URL; `matches` is still to come and lands here too.
+once and keeps working as tiers are added: collections, types, strings, regex, dates and URL.
 
 **The tiers must not disagree about a name.** They are merged in a fixed order and a later tier
 would silently win, so `tests/test_tiers.py` asserts the names are disjoint rather than trusting
@@ -22,6 +21,7 @@ from __future__ import annotations
 
 from ._collections import COLLECTIONS
 from ._dates import DATES
+from ._regex import REGEX
 from ._registry import Function
 from ._strings import STRINGS
 from ._types import TYPES
@@ -37,4 +37,4 @@ def standard_registry() -> dict[str, Function]:
     Returns:
         Name to `Function`, ready to pass as `Evaluator(registry=...)`.
     """
-    return {**COLLECTIONS, **TYPES, **STRINGS, **DATES, **URLS}
+    return {**COLLECTIONS, **TYPES, **STRINGS, **REGEX, **DATES, **URLS}
