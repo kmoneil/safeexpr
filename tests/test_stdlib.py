@@ -13,6 +13,10 @@ import pytest
 
 from safeexpr import Evaluator, standard_registry
 from safeexpr._collections import COLLECTIONS
+from safeexpr._dates import DATES
+from safeexpr._strings import STRINGS
+from safeexpr._types import TYPES
+from safeexpr._urls import URLS
 
 CANONICAL: list[tuple[str, str, dict[str, Any], Any]] = [
     (
@@ -92,8 +96,21 @@ class TestTheRegistryIsPerCaller:
         assert "merge" in standard_registry()
         assert standard_registry()["first"].call is not mine["first"]
 
-    def test_it_holds_the_collections_tier(self) -> None:
-        assert set(standard_registry()) == set(COLLECTIONS)
+    def test_it_holds_every_tier(self) -> None:
+        """**This assertion was `== set(COLLECTIONS)` and had to change**, because it was written
+        when collections was the only tier and is now false by four tiers.
+
+        Containment rather than equality, so it keeps saying what it was written to say, that a
+        tier is actually wired in, without needing an edit every time one is added. The exact
+        composition is asserted in `tests/test_tiers.py`, which checks the registry is precisely
+        the union of the tiers and so would catch a name appearing from nowhere.
+        """
+        registry = set(standard_registry())
+        for tier in (COLLECTIONS, TYPES, STRINGS, DATES, URLS):
+            assert set(tier) <= registry
+        assert len(registry) == sum(
+            len(tier) for tier in (COLLECTIONS, TYPES, STRINGS, DATES, URLS)
+        )
 
 
 class TestFunctionsAreOptIn:

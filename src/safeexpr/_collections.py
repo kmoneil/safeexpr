@@ -46,9 +46,10 @@ Three conventions hold across the whole tier, so that a reader learns them once:
 from __future__ import annotations
 
 import operator
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
+from ._guards import sequence as _sequence
 from ._registry import Function, FunctionError, describe_type
 
 if TYPE_CHECKING:  # pragma: no cover - import for typing only
@@ -58,23 +59,6 @@ if TYPE_CHECKING:  # pragma: no cover - import for typing only
 # two exception types, and both mean "your data, not your expression".
 _TOO_DEEP = "some of them nest too deeply or refer to themselves"
 _NOT_COMPARABLE = "they are not all comparable with each other"
-
-
-def _sequence(value: Any) -> Sequence[Any]:
-    """Return `value` as a list or tuple, or object to it.
-
-    Args:
-        value: The piped value.
-
-    Returns:
-        The same object, once it is known to be a list or a tuple.
-
-    Raises:
-        FunctionError: If it is anything else.
-    """
-    if isinstance(value, (list, tuple)):
-        return value
-    raise FunctionError(f"needs a list, got `{describe_type(value)}`")
 
 
 def _key_for(lazy: LazyExpr, item: Any) -> Any:

@@ -17,6 +17,7 @@ import pytest
 
 from safeexpr import EvaluationError, Evaluator, SafeExprError, evaluate
 from safeexpr._eval import MAX_POWER_RESULT_BITS
+from safeexpr._guards import MAX_RESULT_SIZE
 
 SRC_DIR = Path(__file__).resolve().parent.parent / "src" / "safeexpr"
 
@@ -445,3 +446,85 @@ class TestFieldAccessWithoutAWrapper:
     def test_non_string_keys_are_reachable_by_subscript(self) -> None:
         """Dot access cannot spell them, but subscript can, so they are not lost."""
         assert evaluate("d[1]", {"d": {1: "one"}}) == "one"
+
+
+class TestSequenceRepetitionIsBounded:
+    """R7 lists a string length cap among the deterministic bounds, and it had never been built.
+
+    The step budget cannot see this hole, because the budget counts *nodes evaluated* and
+    `"a" * 5000000` is three nodes. The `**` cap does not cover it either: that guards the width
+    of an integer result, and repetition produces a sequence.
+    """
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            '"a" * 5000000',
+            '5000000 * "a"',
+            "[0] * 5000000",
+            "(1, 2) * 3000000",
+            'b"a" * 5000000',
+        ],
+    )
+    def test_a_repetition_over_the_cap_is_refused(self, source: str) -> None:
+        with pytest.raises(EvaluationError) as caught:
+            evaluate(source, {})
+        assert "over the limit" in str(caught.value)
+
+    @pytest.mark.parametrize(
+        ("source", "expected"),
+        [
+            ('"ab" * 3', "ababab"),
+            ('3 * "ab"', "ababab"),
+            ("[1, 2] * 2", [1, 2, 1, 2]),
+            ('"a" * 0', ""),
+            ('"a" * -1', ""),
+            ("3 * 4", 12),
+            ("2.5 * 2", 5.0),
+        ],
+    )
+    def test_ordinary_multiplication_and_repetition_are_untouched(
+        self, source: str, expected: Any
+    ) -> None:
+        assert evaluate(source, {}) == expected
+
+    def test_the_cap_is_on_the_predicted_size_not_the_allocated_one(self) -> None:
+        """An error raised after the allocation has already cost the allocation, which is the
+        whole thing being prevented. Asserted by making the multiplication itself explode if it
+        is reached at all."""
+
+        class Counted(list):  # type: ignore[type-arg]
+            def __mul__(self, other: object) -> Any:  # pragma: no cover - must not be called
+                raise AssertionError("the repetition was performed before the cap was checked")
+
+        with pytest.raises(EvaluationError) as caught:
+            evaluate("x * n", {"x": Counted([0]), "n": MAX_RESULT_SIZE + 1})
+        assert "over the limit" in str(caught.value)
+
+    def test_the_cap_holds_at_the_boundary(self) -> None:
+        assert len(evaluate("x * n", {"x": "a", "n": MAX_RESULT_SIZE})) == MAX_RESULT_SIZE
+        with pytest.raises(EvaluationError):
+            evaluate("x * n", {"x": "a", "n": MAX_RESULT_SIZE + 1})
+
+
+class TestRegressions:
+    def test_regression_repetition_a_short_expression_could_allocate_without_limit(self) -> None:
+        """Fifteen characters of expression allocated five megabytes, and the constant was free
+        to be larger.
+
+        Measured against this evaluator before the guard existed: `"a" * 5000000` produced a
+        five-million-character string and `[0] * 5000000` a five-million-item list, neither
+        bounded by anything. The source cap bounds the *expression*, the step budget bounds the
+        *nodes evaluated*, and the power cap bounds the width of an integer; none of the three
+        looks at the size of a sequence.
+        """
+        for source in ('"a" * 5000000', "[0] * 5000000"):
+            with pytest.raises(EvaluationError) as caught:
+                evaluate(source, {})
+            assert "over the limit" in str(caught.value)
+
+    def test_regression_repetition_nesting_it_does_not_get_around_the_cap(self) -> None:
+        """Each repetition is checked on its own, so the inner one is refused before the outer
+        one can multiply it."""
+        with pytest.raises(EvaluationError):
+            evaluate('("a" * 100000) * 100000', {})

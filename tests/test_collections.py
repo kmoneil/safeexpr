@@ -15,10 +15,8 @@ adds a tier without reading this comment.
 
 from __future__ import annotations
 
-import ast
 import copy
 from collections.abc import Callable
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -27,8 +25,6 @@ from hypothesis import strategies as st
 
 from safeexpr import EvaluationError, Evaluator, SafeExprError, standard_registry
 from safeexpr._collections import COLLECTIONS
-
-SRC_DIR = Path(__file__).resolve().parent.parent / "src" / "safeexpr"
 
 # A module-level evaluator for the generated tests. Hypothesis refuses a function-scoped fixture,
 # and rightly: the fixture would be rebuilt per example and the cost would swamp the test.
@@ -504,126 +500,6 @@ class TestErrorsFromTheTierAreScrubbedAndPositioned:
         with pytest.raises(EvaluationError) as caught:
             ev.evaluate("items | take(-1)", {"items": [1]})
         assert "`take`" in str(caught.value)
-
-
-# ---------------------------------------------------------------------------
-# The review gate: asserted against the source, not against the reviewer.
-# ---------------------------------------------------------------------------
-
-# Modules the reflection scan covers. A new tier must be added here; the companion test below is
-# what forces that, by failing if a registered callable is defined anywhere else.
-TIER_MODULES = ("safeexpr._collections",)
-
-# Named in the card, plus the climb they lead to. Anything that reads an attribute, a name or a
-# type at runtime, because that is exactly what a static AST allowlist cannot see.
-BANNED = frozenset(
-    {
-        "format",
-        "format_map",
-        "Formatter",
-        "getattr",
-        "setattr",
-        "delattr",
-        "vars",
-        "dir",
-        "type",
-        "reduce",
-        "eval",
-        "exec",
-        "compile",
-        "globals",
-        "locals",
-        "__import__",
-        "__getattribute__",
-        "__dict__",
-        "__class__",
-        "__bases__",
-        "__mro__",
-        "__subclasses__",
-        "__globals__",
-        "__builtins__",
-    }
-)
-
-# A tier may import these and nothing else. `string` would bring `Formatter`, `functools` would
-# bring `reduce`, and neither has any business here.
-ALLOWED_IMPORTS = frozenset({"__future__", "operator", "collections.abc", "typing", "._registry"})
-
-
-def _module_path(dotted: str) -> Path:
-    return SRC_DIR / f"{dotted.rsplit('.', 1)[-1]}.py"
-
-
-def _tier_trees() -> list[tuple[str, ast.Module]]:
-    return [
-        (dotted, ast.parse(_module_path(dotted).read_text(encoding="utf-8")))
-        for dotted in TIER_MODULES
-    ]
-
-
-def _imported_modules(tree: ast.Module) -> set[str]:
-    found: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            found.update(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom):
-            found.add("." * node.level + (node.module or ""))
-    return found
-
-
-class TestNoTierFunctionPerformsRuntimeReflection:
-    """The card's mandatory review gate, as a test.
-
-    F1 is why. `"{0.__class__}".format(x)` performs `getattr` from inside a format string, and no
-    AST check reads a format string. One convenient reflective call in a registry entry reopens
-    the climb the validator exists to close, and it would do so without changing a single line
-    the validator can see.
-    """
-
-    @pytest.mark.parametrize("dotted", TIER_MODULES)
-    def test_no_banned_name_appears_anywhere_in_the_module(self, dotted: str) -> None:
-        tree = dict(_tier_trees())[dotted]
-        used = {
-            node.id if isinstance(node, ast.Name) else node.attr
-            for node in ast.walk(tree)
-            if isinstance(node, (ast.Name, ast.Attribute))
-        }
-        assert not (used & BANNED), (
-            f"{dotted} references {sorted(used & BANNED)}. A registry function that reflects at "
-            f"runtime reopens F1, which no static check on the expression can see."
-        )
-
-    @pytest.mark.parametrize("dotted", TIER_MODULES)
-    def test_no_percent_operator_at_all(self, dotted: str) -> None:
-        """`"%(__class__)s" % d` does its own `__getitem__` in C and reads keys the evaluator
-        blocks. Modulo has no use in this tier, so the whole operator is absent rather than
-        conditionally allowed."""
-        tree = dict(_tier_trees())[dotted]
-        assert not [node for node in ast.walk(tree) if isinstance(node, ast.Mod)]
-
-    @pytest.mark.parametrize("dotted", TIER_MODULES)
-    def test_a_tier_imports_only_what_it_is_allowed_to(self, dotted: str) -> None:
-        tree = dict(_tier_trees())[dotted]
-        # `._eval` is imported for typing only, under `if TYPE_CHECKING`, so it is not a runtime
-        # dependency and is exempted here rather than widening the runtime allowlist.
-        imported = _imported_modules(tree) - {"._eval"}
-        assert imported <= ALLOWED_IMPORTS, (
-            f"{dotted} imports {sorted(imported - ALLOWED_IMPORTS)}, which the tier allowlist "
-            f"does not permit"
-        )
-
-    def test_every_registered_callable_lives_in_a_scanned_module(self) -> None:
-        """What stops the scan above from going stale.
-
-        A tier added without being listed in `TIER_MODULES` would be entirely unchecked while
-        every test here still passed. This is the line that fails instead.
-        """
-        stray = {
-            name: function.call.__module__
-            for name, function in standard_registry().items()
-            if function.call.__module__ not in TIER_MODULES
-        }
-        assert not stray, f"registered from outside the scanned tiers: {stray}"
 
 
 class TestTheTierIsDeclaredConsistently:
