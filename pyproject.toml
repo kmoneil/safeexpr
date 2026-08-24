@@ -297,4 +297,14 @@ testpaths = ["tests"]
 norecursedirs = ["*.egg", ".*", "build", "dist", "_tmp", "node_modules"]
 addopts = "-ra --strict-markers --strict-config"
 xfail_strict = true
+# `--strict-markers` is on, so every marker this suite applies has to be declared. `benchmark` and
+# `limit_memory` come from their plugins; `slow` is ours.
+#
+# **`slow` is deselected by default and run in full by CI.** `tests/conftest.py` carries the
+# argument; the short version is that two tests running a real measurement script as a subprocess
+# were a third of the suite, and a slow suite changes engineering behaviour long before it fails a
+# gate. `scripts/lanes.py` passes `--runslow` in the lanes CI runs.
+markers = [
+  "slow: runs a real measurement as a subprocess; deselected unless --runslow (CI passes it)",
+]
 filterwarnings = ["error"]

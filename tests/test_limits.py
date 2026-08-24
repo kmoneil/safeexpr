@@ -19,10 +19,14 @@ be constant across scales, which is what makes extrapolating to the committed 10
 from __future__ import annotations
 
 import ast
+import importlib.util
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -34,7 +38,19 @@ from safeexpr._validate import MAX_EXPRESSION_DEPTH
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
+import lanes  # noqa: E402
 import limits  # noqa: E402
+
+# The suite's own selection rules, loaded by path under a name of its own. `import conftest` would
+# work today because pytest has already imported this one, and would start resolving to
+# `tests/benchmarks/conftest.py` the moment anything about collection order changed.
+_SPEC = importlib.util.spec_from_file_location(
+    "safeexpr_suite_conftest", ROOT / "tests" / "conftest.py"
+)
+assert _SPEC is not None
+assert _SPEC.loader is not None
+conftest = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(conftest)
 
 SRC_DIR = ROOT / "src" / "safeexpr"
 
@@ -213,8 +229,20 @@ class TestNoLimitEscapesTheTable:
         )
 
 
+@pytest.mark.slow
 class TestTheScriptRuns:
-    """The card asks for a benchmark script runnable by a third party, so it is run."""
+    """The script is meant to be runnable by a third party, so it is run.
+
+    **These two are a third of the suite's wall time**, 17.9 s of 58.8 s measured, because each
+    runs `scripts/limits.py --quick` as a subprocess and the script does real timing work. That is
+    the point of it, and `--quick` already skips the 100,000-item runs.
+
+    They differ only in output format: `--json` emits JSON *instead of* the table, so neither
+    invocation can serve both. Rather than change a published script's command line so a test can
+    run faster, the pair is marked `slow`, deselected from a bare `pytest`, and run in full by the
+    `fast` and `compat` lanes. `tests/conftest.py` carries the argument and
+    `test_regression_limits_the_script_still_runs_in_ci` below is what keeps the second half true.
+    """
 
     def test_the_table(self) -> None:
         finished = subprocess.run(
@@ -270,3 +298,145 @@ class TestRegressions:
         difference that was not there."""
         dearer = {name: f.cost for name, f in standard_registry().items() if f.cost != 1}
         assert dearer == {"matches": 10}
+
+
+class TestTheSuiteKeepsItsShape:
+    """Two tests were a third of the suite, and this is what keeps the fix honest.
+
+    They are deselected from a bare `pytest` and run in full by the lanes CI invokes. The saving is
+    real, 58.8 s to 39.6 s measured on one machine, and every part of it depends on the second half
+    of that sentence staying true. A marker that quietly stopped running in CI would be strictly
+    worse than the ten seconds it saved.
+    """
+
+    def test_regression_limits_the_script_still_runs_in_ci(self) -> None:
+        """The half that a marker makes easy to lose.
+
+        Asserted at both ends: the lane's command carries `--runslow`, and CI invokes that lane.
+        Either one alone would pass while the tests stopped running.
+        """
+        assert "--runslow" in lanes.LANES_BY_NAME["fast"].command, (
+            "the `fast` lane no longer asks for the slow tests, so nothing in CI runs "
+            "scripts/limits.py at all"
+        )
+        assert "--runslow" in lanes.LANES_BY_NAME["compat"].command, (
+            "the `compat` lane no longer asks for them, so the matrix stopped covering the limits "
+            "that are interpreter behaviour, which is the reason the matrix exists"
+        )
+        workflow = ROOT / ".github" / "workflows" / "ci.yml"
+        if not workflow.is_file():
+            pytest.skip("no .github/workflows/ci.yml: this is a distribution, not a checkout")
+        text = workflow.read_text(encoding="utf-8")
+        assert "lanes.py fast" in text
+        assert "lanes.py compat" in text
+
+    def test_regression_limits_the_marked_tests_are_the_two_that_were_measured(self) -> None:
+        """A marker that spread would take coverage out of the inner loop a test at a time."""
+        source = ast.parse((ROOT / "tests" / "test_limits.py").read_text(encoding="utf-8"))
+        marked = {
+            node.name
+            for node in ast.walk(source)
+            if isinstance(node, (ast.ClassDef, ast.FunctionDef))
+            for decorator in node.decorator_list
+            if isinstance(decorator, ast.Attribute) and decorator.attr == "slow"
+        }
+        assert marked == {"TestTheScriptRuns"}, (
+            f"`slow` is now on {sorted(marked)}. It was added for two tests that run a real "
+            f"measurement as a subprocess; anything else marked with it is coverage leaving the "
+            f"inner loop without an argument."
+        )
+
+    def test_regression_limits_the_samples_were_not_quietly_reduced(self) -> None:
+        """**The flake this repository has already fixed once, in this file.**
+
+        `seconds_for` took a median of three and flaked `test_the_aggregates_are_within_a_small_
+        factor` about one run in five on a busy machine. It takes the minimum of five now, because
+        interference only ever adds time. Cutting sample counts is the cheapest-looking way to make
+        this suite faster and it is how a measurement becomes a flake, so it is ruled out in
+        writing and asserted here rather than left to a comment.
+        """
+        source = (ROOT / "scripts" / "limits.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        function = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "seconds_for"
+        )
+        rounds = function.args.defaults[-1]
+        assert isinstance(rounds, ast.Constant), f"seconds_for's rounds is {ast.dump(rounds)}"
+        assert rounds.value >= 5, (
+            f"seconds_for takes {rounds.value} rounds. Five was chosen after a flake, and fewer "
+            f"is how it comes back."
+        )
+        returns = [node for node in ast.walk(function) if isinstance(node, ast.Return)]
+        called = {
+            node.func.id
+            for statement in returns
+            for node in ast.walk(statement)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+        assert "min" in called, "seconds_for no longer returns a minimum"
+        assert "median" not in called, (
+            "seconds_for returns a median again. A median of a few samples moves with whatever "
+            "else the machine is doing; the minimum cannot be inflated by a busy box."
+        )
+
+    def test_the_runtime_tripwire_is_loose_enough_not_to_be_noise(self) -> None:
+        """A tripwire near the measurement fails on a busy machine and gets deleted."""
+        assert conftest.MAX_SUITE_SECONDS >= 180, (
+            "the ceiling is close enough to the measured runtime to fail for a reason nobody can "
+            "act on, which is how a check gets deleted rather than investigated"
+        )
+
+    @staticmethod
+    def _aged(args: list[str]) -> Any:
+        """A stand-in for pytest's `Config`, with the clock set far past the ceiling.
+
+        Cheaper and more exact than running a deliberately slow suite as a subprocess, and it
+        exercises the line that actually fails rather than something shaped like it.
+        """
+        config = SimpleNamespace(
+            args=args,
+            option=SimpleNamespace(keyword="", markexpr=""),
+            getini=lambda name: ["tests"],
+        )
+        # The attribute the hook looks for. Spelled out rather than reached through the module's
+        # private name, so this test still reads as a description of the contract.
+        config.safeexpr_suite_started = time.perf_counter() - 10_000
+        return config
+
+    @staticmethod
+    def _reporter() -> tuple[Any, list[str], Any]:
+        """A stand-in for pytest's terminal reporter, its captured lines, and its session."""
+        lines: list[str] = []
+        session = SimpleNamespace(exitstatus=0, testsfailed=0)
+        reporter = SimpleNamespace(
+            _session=session,
+            write_line=lambda text, **_: lines.append(text),
+        )
+        return reporter, lines, session
+
+    def test_the_runtime_tripwire_can_actually_fail(self) -> None:
+        """A gate nobody has watched fail is not known to work."""
+        reporter, lines, session = self._reporter()
+        conftest.pytest_terminal_summary(reporter, 0, self._aged(["tests"]))
+        assert any("SUITE TOO SLOW" in line for line in lines), lines
+        assert session.exitstatus != 0
+        assert session.testsfailed == 1
+
+    def test_the_tripwire_stays_quiet_for_a_subset(self) -> None:
+        """A subset is faster by construction, so timing one against a whole-suite ceiling would
+        be measuring nothing at all."""
+        reporter, lines, _ = self._reporter()
+        conftest.pytest_terminal_summary(reporter, 0, self._aged(["tests/test_eval.py"]))
+        assert lines == []
+
+    def test_the_tripwire_reports_the_time_even_when_it_passes(self) -> None:
+        """A ceiling nobody sees the distance to is one that gets crossed in a single commit."""
+        reporter, lines, session = self._reporter()
+        config = self._aged(["tests"])
+        config.safeexpr_suite_started = time.perf_counter()
+        conftest.pytest_terminal_summary(reporter, 0, config)
+        assert len(lines) == 1
+        assert lines[0].startswith("suite wall time:")
+        assert session.exitstatus == 0

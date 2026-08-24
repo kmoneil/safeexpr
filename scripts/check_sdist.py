@@ -138,8 +138,14 @@ def main() -> int:
         print("==> running the shipped suite from the unpacked sdist")
         # From the unpacked directory, so `testpaths` and every path a test resolves relative to
         # its own location point inside the distribution rather than back at the checkout.
+        #
+        # `--runslow` for the same reason the `fast` lane passes it: two tests are deselected from a
+        # developer's inner loop and must run wherever a green result is meant to mean the suite
+        # passed. This lane is also the one that would notice `tests/conftest.py` or `scripts/`
+        # falling out of the distribution, since the flag is defined in the first and the tests it
+        # re-selects run the second.
         _run(
-            [str(python), "-m", "pytest", "-q", "--no-header"],
+            [str(python), "-m", "pytest", "-q", "--no-header", "--runslow"],
             cwd=unpacked,
             quiet=False,
             diagnosis=(
