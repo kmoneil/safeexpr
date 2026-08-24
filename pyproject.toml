@@ -235,7 +235,7 @@ ban-relative-imports = "parents"
 #
 # `scripts/` inverts T20: printing the lane table *is* what the runner does, so "no print" there
 # would be a rule against the program.
-"scripts/**" = ["T20", "S603", "ANN401"]
+"scripts/**" = ["T20", "S603", "ANN401", "E402", "S311"]
 # ANN401 forbids `typing.Any`, and it is right almost everywhere. It is wrong in these.
 # They evaluate a dynamically-typed expression language: the type of a value *is* whatever the
 # expression produced, and the node handlers and the registry tiers take and return exactly that.
@@ -251,7 +251,7 @@ ban-relative-imports = "parents"
 "src/safeexpr/_dates.py" = ["ANN401"]
 "src/safeexpr/_urls.py" = ["ANN401"]
 "src/safeexpr/_regex.py" = ["ANN401"]
-"tests/**" = ["D", "ANN", "S101", "S603", "S607", "PLR2004", "T20"]
+"tests/**" = ["D", "ANN", "S101", "S603", "S607", "S311", "PLR2004", "T20"]
 
 # ---------------------------------------------------------------------------
 # mypy, scoped to shipped code
