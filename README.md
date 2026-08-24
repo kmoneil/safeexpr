@@ -123,6 +123,26 @@ and 10⁵. That rate is what makes a budget expressible in items rather than in 
 originally proposed 100,000 steps it would have covered about twenty thousand items and raised on
 a hundred thousand.
 
+## How this is tested
+
+Beyond the escape corpus, three things run on every supported interpreter:
+
+- **Differential testing against CPython.** Generated expressions inside the safe subset must
+  give the answer `eval` gives, or both must refuse. Coverage of the node allowlist is asserted,
+  so a generator that drifts toward easy cases fails rather than passing quietly.
+- **An audit-hook tripwire.** `python scripts/audit_fuzz.py` fuzzes the evaluator with
+  `sys.addaudithook` watching, and fails if **any** audit event fires during evaluation beyond
+  this package parsing its own source. `exec`, `import`, `open`, `os.system` and the subprocess
+  events are all observed process-wide, so an escape trips it whether or not anybody wrote a test
+  for that escape.
+- **A published limits measurement.** `python scripts/limits.py` reproduces the table above.
+
+> **Audit hooks are a test tripwire here, not a defence layer, and nothing installs one at
+> runtime.** They observe rather than block; they fire process-wide, so a host would pay for
+> every audited operation in its process; and a hook cannot be uninstalled once added, which
+> makes it a target rather than a shield if a sandbox is already broken. If you want one in your
+> own process, that is your decision to make on its own merits.
+
 ## Threat model
 
 > Expressions come from semi-trusted config authors, not anonymous internet users. The sandbox is

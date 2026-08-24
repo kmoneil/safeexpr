@@ -16,6 +16,7 @@ from __future__ import annotations
 import re
 import statistics
 import time
+import warnings
 from typing import Any
 
 import pytest
@@ -462,7 +463,77 @@ class TestPropertiesOverGeneratedPatterns:
             assert check(f"(?:{pattern})*") is not None
 
 
+class TestPatternsTheEngineWarnsAbout:
+    """`re` warns about some patterns rather than refusing them, and a warning is an exception
+    under `-W error`, which is ordinary in CI and is this project's own pytest setting."""
+
+    WARNING_PATTERNS = (r"[a--b]", r"[[a]]", r"[a||b]", r"[a&&b]")
+
+    @pytest.mark.parametrize("pattern", WARNING_PATTERNS)
+    def test_it_is_refused_cleanly_when_warnings_are_errors(self, pattern: str) -> None:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            with pytest.raises(EvaluationError) as caught:
+                EV.evaluate("matches(x, p)", {"x": "ab", "p": pattern})
+        message = str(caught.value)
+        assert "bug in safeexpr" not in message
+        assert "`matches`" in message
+
+    @pytest.mark.parametrize("pattern", [r"[[a]]", r"[a||b]", r"[a&&b]"])
+    def test_the_same_pattern_is_accepted_when_warnings_are_not_errors(self, pattern: str) -> None:
+        """**An asymmetry, stated rather than hidden.** A pattern the engine only warns about
+        compiles fine, so under ordinary filters it works and under `-W error` it is refused.
+
+        Removing the asymmetry would mean capturing warnings around every compile, and
+        `warnings.catch_warnings` mutates a process-global filter list. That would quietly break
+        the promise that one evaluator is safe to share between threads, which is a worse thing
+        to be untrue than this is to be uneven.
+        """
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            assert EV.evaluate("matches(x, p)", {"x": "ab", "p": pattern}) is not None
+
+    def test_a_pattern_that_is_also_invalid_is_refused_either_way(self) -> None:
+        """`[a--b]` both warns and fails to compile, so the filters change only the message."""
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with pytest.raises(EvaluationError):
+                EV.evaluate("matches(x, p)", {"x": "ab", "p": "[a--b]"})
+
+    def test_the_message_does_not_repeat_the_pattern_back(self) -> None:
+        """The pattern can come from the host's data, and the engine's own warning text quotes
+        it."""
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            with pytest.raises(EvaluationError) as caught:
+                EV.evaluate("matches(x, p)", {"x": "ab", "p": "[sk-live--secret]"})
+        assert "sk-live" not in str(caught.value)
+
+    def test_an_ordinary_pattern_warns_about_nothing(self) -> None:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            assert EV.evaluate('matches("abc", "^a[b-c]+$")', {}) is True
+
+
 class TestRegressions:
+    def test_regression_regex_a_warned_about_pattern_was_reported_as_a_bug_here(self) -> None:
+        """**Found by the audit-hook fuzzer, and by nothing that was looking for it.**
+
+        Under `-W error` a pattern like `[a--b]` raised `FutureWarning` from inside the gate's
+        parse, which no handler caught, so it reached the boundary as "internal error while
+        evaluating (FutureWarning); this is a bug in safeexpr, please report it".
+
+        The fuzzer did not find it by testing regular expressions. It found it because printing
+        the warning made CPython open this package's source to show the offending line, and the
+        audit hook saw an `open` during evaluation.
+        """
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            with pytest.raises(EvaluationError) as caught:
+                EV.evaluate("matches(x, p)", {"x": "ab", "p": "[a--b]"})
+        assert "bug in safeexpr" not in str(caught.value)
+        assert "warns about" in str(caught.value)
+
     def test_regression_regex_bounded_nesting_is_still_nesting(self) -> None:
         """The research proposed counting *unbounded* repeats, and `^(a{1,20}){1,20}$` has none.
 

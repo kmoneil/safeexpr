@@ -52,6 +52,22 @@ optimises it, and it is refused anyway: it is the textbook shape, the optimisati
 implementation detail, and a gate that refuses a pattern which happens to be fast today is worth
 much more than one that accepts a pattern which is slow tomorrow.
 
+**A pattern the engine warns about behaves differently depending on the host's warning filters**,
+and that is worth stating plainly rather than leaving to be discovered. `[[a]]`, `[a||b]` and
+`[a&&b]` compile fine and only warn, so under ordinary filters they work; under `-W error`, which
+is ordinary in CI, the warning arrives as an exception from inside the parser and the pattern is
+refused. Before that refusal existed it arrived as "internal error ... this is a bug in
+safeexpr", which is the wrong answer to somebody's slightly odd regular expression.
+
+Removing the asymmetry would mean capturing warnings around every parse, and
+`warnings.catch_warnings` mutates a process-global filter list. That would quietly break the
+promise that one evaluator is safe to share between threads, which is a worse thing to be untrue
+than this is to be uneven.
+
+The audit-hook fuzzer found this, and not by testing regular expressions: printing the warning
+made CPython open this package's source to show the offending line, and the hook saw an `open`
+during evaluation.
+
 **`re._parser` is a private standard-library API**, renamed from `sre_parse` in 3.11. If it ever
 moves, this module fails closed: every pattern is refused with a message saying the checker is
 unavailable, rather than patterns being compiled unchecked. `tests/test_regex.py` carries the
@@ -264,6 +280,19 @@ def check(pattern: str) -> str | None:
         parsed = _PARSER.parse(pattern)
     except re.error:
         return "is not a valid regular expression"
+    except Warning:
+        # **The gate parses before it compiles, so this is where a warning arrives first.** `re`
+        # warns about some patterns rather than refusing them, and a host under `-W error`, which
+        # is ordinary in CI, gets that warning as an exception from inside the parser. Unhandled
+        # it reached the boundary as "internal error ... this is a bug in safeexpr", which is the
+        # wrong answer to somebody's slightly odd regular expression.
+        #
+        # The warning's own text is not repeated back: it quotes the pattern, and the pattern can
+        # come from the host's data.
+        return (
+            "is one the regular expression engine warns about, so it is refused rather than "
+            "compiled"
+        )
     if _too_deep(parsed):
         return f"nests more than {_MAX_NESTING} levels deep"
     return _objection(parsed)
@@ -287,7 +316,16 @@ def _compiled(pattern: str) -> re.Pattern[str]:
     objection = check(pattern)
     if objection is not None:
         raise FunctionError(f"this pattern {objection}")
-    built = re.compile(pattern)
+    try:
+        built = re.compile(pattern)
+    except Warning:
+        # The gate above catches this first in every case measured; kept because `check` parses
+        # and this compiles, and the two are not obliged to warn about exactly the same things.
+        failure = FunctionError(
+            "this pattern is one the regular expression engine warns about, so it is refused "
+            "rather than compiled"
+        )
+        raise failure from None
     if len(_CACHE) >= _MAX_CACHE:
         # Dropped wholesale rather than by age. The pattern can come from the context and vary
         # per row, so the cache has to be bounded; keeping the bookkeeping for an eviction order

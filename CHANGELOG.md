@@ -65,6 +65,20 @@ in; the remaining function tiers and the evaluation budget are not.
   corpus of nothing but rejections would pass against a sandbox that refuses everything.
 
 ### Fixed
+- **A regular expression the engine warns about was reported as a bug in this package.** Under
+  `-W error`, which is ordinary in CI and is this project's own pytest setting, a pattern like
+  `[a--b]` raised `FutureWarning` from inside the pattern gate's parse, reaching the boundary as
+  "internal error while evaluating (FutureWarning); this is a bug in safeexpr, please report it".
+  It is now an ordinary refusal naming the cause, without repeating the pattern back.
+
+  **Found by the audit-hook fuzzer, and not by anything looking for it**: printing the warning
+  made CPython open this package's source to show the offending line, and the hook saw an `open`
+  during evaluation.
+
+  One asymmetry remains and is documented: a pattern that only warns compiles fine, so under
+  ordinary filters it works and under `-W error` it is refused. Removing that would need
+  `warnings.catch_warnings`, which mutates a process-global filter list and would quietly break
+  the promise that one evaluator is safe to share between threads.
 - **Sequence repetition had no cap at all.** `"a" * 5000000` allocated a five-megabyte string and
   `[0] * 5000000` a five-million-item list, from fifteen characters of expression, and the
   constant was free to be larger. No existing limit saw it: the source cap bounds the expression,
@@ -120,6 +134,17 @@ in; the remaining function tiers and the evaluation budget are not.
   declared and not yet charged.
 - `FunctionError`, for a registry function to say what is wrong with the values it was given. It
   carries a message and nothing else, and the evaluator adds the position.
+- **An audit-hook tripwire.** `scripts/audit_fuzz.py` fuzzes the evaluator with
+  `sys.addaudithook` watching and fails if any audit event fires during evaluation beyond this
+  package parsing its own source. Every other test here checks something somebody thought of;
+  this is the one that watches for what nobody did.
+  - It runs in its own process, because a hook cannot be removed once installed and fires for
+    every audited operation.
+  - It reports what it reached, not only what it found: 60,000 expressions, 48,737 past the
+    parser, 5,539 evaluated. A fuzzer whose inputs all die at the parser proves nothing, and the
+    suite asserts floors on those counts.
+  - **A tripwire, not a defence layer**, and nothing installs a hook at runtime. Hooks observe
+    rather than block, fire process-wide, and cannot be uninstalled. The README says so.
 - **Differential testing against CPython itself**, over generated expressions inside the safe
   subset. The property is that this package and `eval` either agree on a value or both refuse,
   which keeps division by zero, mismatched comparisons and out-of-range indexing in the
