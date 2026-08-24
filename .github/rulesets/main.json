@@ -1,0 +1,81 @@
+{
+  "bypass_actors": [],
+  "conditions": {
+    "ref_name": {
+      "exclude": [],
+      "include": [
+        "~DEFAULT_BRANCH"
+      ]
+    }
+  },
+  "enforcement": "active",
+  "name": "main",
+  "rules": [
+    {
+      "type": "deletion"
+    },
+    {
+      "type": "non_fast_forward"
+    },
+    {
+      "parameters": {
+        "allowed_merge_methods": [
+          "rebase"
+        ],
+        "dismiss_stale_reviews_on_push": false,
+        "require_code_owner_review": false,
+        "require_extra_approval_for_unattributed_changes": true,
+        "require_last_push_approval": false,
+        "required_approving_review_count": 0,
+        "required_review_thread_resolution": false
+      },
+      "type": "pull_request"
+    },
+    {
+      "parameters": {
+        "do_not_enforce_on_create": false,
+        "required_status_checks": [
+          {
+            "context": "gates"
+          },
+          {
+            "context": "zero-deps"
+          },
+          {
+            "context": "sdist"
+          },
+          {
+            "context": "fast (ubuntu-latest)"
+          },
+          {
+            "context": "fast (macos-latest)"
+          },
+          {
+            "context": "corpus (3.11)"
+          },
+          {
+            "context": "corpus (3.12)"
+          },
+          {
+            "context": "corpus (3.13)"
+          },
+          {
+            "context": "corpus (3.14)"
+          },
+          {
+            "context": "compat (3.11)"
+          },
+          {
+            "context": "compat (3.12)"
+          },
+          {
+            "context": "compat (3.14)"
+          }
+        ],
+        "strict_required_status_checks_policy": false
+      },
+      "type": "required_status_checks"
+    }
+  ],
+  "target": "branch"
+}
