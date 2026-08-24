@@ -19,6 +19,7 @@ every supported interpreter; `python scripts/lanes.py corpus` runs just this.
 | `stage` | Where it must be rejected: `parse`, `validate` or `evaluate`, or `allowed` for a control |
 | `expect_message` | Substring the error must contain, so an entry cannot pass for the wrong reason |
 | `functions` | Optional. Which registry to run against: `none` (default) or `standard` |
+| `budget` | Optional. Step budget for this entry, so a denial-of-service entry need not burn the real default |
 | `note` | Optional. What the attack is, and why it is interesting |
 | `python_min` / `python_max` | Optional. Some attacks only exist where the syntax does |
 

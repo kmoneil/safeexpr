@@ -118,6 +118,44 @@ class EvaluationError(SafeExprError):
     """
 
 
+class BudgetExceededError(SafeExprError):
+    """The expression ran out of steps before it finished.
+
+    Named with the `Error` suffix every other member of this hierarchy carries, rather than the
+    bare `BudgetExceeded` the design sketched. Six of six existing errors end in `Error` and the
+    lint enforces it; nothing has shipped under the other spelling.
+
+    **The one limit that bounds work rather than shape.** Source length, expression depth and the
+    power cap all bound what an expression *is*; none of them bounds what it *does*, and because
+    lazy arguments nest, `map(a, where(b, _ == _2))` is O(n*m) from a short, shallow source. A
+    rule that fits in a tweet can run for an hour on a large enough context.
+
+    Raised deterministically from a counter, never from a timer. No `signal`, no `threading`, no
+    `concurrent.futures`: an alarm is main-thread-only and POSIX-only, and an executor timeout
+    leaks the thread that is still running. A counter gives the same answer on the same input on
+    every platform, inside any thread, which is what makes the bound something a host can reason
+    about rather than something it has to hope for.
+    """
+
+    def __init__(
+        self,
+        budget: int,
+        *,
+        source: str = "",
+        lineno: int | None = None,
+        offset: int | None = None,
+    ) -> None:
+        super().__init__(
+            f"expression used more than its budget of {budget:,} steps and was stopped; "
+            f"this limit is on total work rather than on the size of the expression, so a "
+            f"short rule over a large collection can reach it",
+            source=source,
+            lineno=lineno,
+            offset=offset,
+        )
+        self.budget = budget
+
+
 class InternalError(SafeExprError):
     """Something raised that this package did not anticipate.
 

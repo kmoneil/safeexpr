@@ -9,20 +9,39 @@ watching: a regression here is a regression in the only loop this package has.
 parse, validate and evaluate with no collection involved, so a change in the numbers below can be
 attributed to the tier rather than to the evaluator underneath it.
 
-Measured over the thousand rows below, mean per evaluation, on the machine the tier was written
-on:
+Measured over the thousand rows below, mean per evaluation, on the machine this was written on.
+The second column is before the step budget existed and the third is with it:
 
-    bare_comparison        18 us     one expression, no collection
-    pluck                 142 us     a thousand dict lookups, no tree walked per item
-    max_by                504 us
-    map                   505 us
-    unique_by             542 us
-    sort_by               573 us
-    group_by              576 us
-    where                 914 us     a bigger predicate tree than map's, walked a thousand times
-    where_then_map      1,139 us
-    canonical_pipeline  1,497 us     the design's fourth canonical use case
-    nested_predicate   11,553 us     twenty thousand evaluations, and it shows
+                        no budget   with budget
+    bare_comparison         17 us        19 us     one expression, no collection
+    pluck                  129 us       137 us     dict lookups; no tree walked per item
+    max_by                 525 us       577 us
+    map                    465 us       632 us
+    unique_by              530 us       598 us
+    sort_by                540 us       620 us
+    group_by               542 us       637 us
+    where                  892 us     1,153 us     a bigger predicate tree than map's
+    where_then_map       1,166 us     1,344 us
+    canonical_pipeline   1,545 us     1,807 us     the design's fourth canonical use case
+    nested_predicate    12,047 us    14,067 us     twenty thousand evaluations, and it shows
+
+**The budget costs roughly 10 to 17%, and that column is the price of the guarantee.** It is a
+counter read and written once per node evaluated, about 30ns against roughly 80ns for the
+dispatch beside it, and no spelling measured cheaper: a chained assignment, a countdown tested
+for truthiness and a list cell all came out the same. Paying it buys the only bound on *work*
+this package has; without it `map(a, where(b, _ == _2))` is O(n*m) from a thirty-character
+source, which is the denial of service expr-lang shipped.
+
+`pluck` is the control that proves where the cost goes: it walks no tree per item, and it is the
+one row that barely moves. Everything charged per item moves by roughly the ratio of nodes
+evaluated to work done.
+
+Two of those rows are worth reading rather than skimming. **`pluck` is far faster than the `map`
+that does the same thing**, because it reads a key directly instead of walking an AST per item;
+that is a better argument for it existing than the dynamic field name it was added for. And
+**`where` costs more than `map`** on the same thousand rows, which is not the loop being slower
+but the predicate being a larger tree: the per-item cost here is the size of the expression, not
+the size of the item.
 
 Two of those are worth reading rather than skimming. **`pluck` is 3.5x faster than the `map`
 that does the same thing**, because it reads a key directly instead of walking an AST per item;
@@ -31,9 +50,10 @@ that is a better argument for it existing than the dynamic field name it was add
 slower but the predicate being a larger tree: the per-item cost here is the size of the
 expression, not the size of the item.
 
-These are absolute figures on one noisy box, where a mean can move 15% between runs. Treat them
-as an order of magnitude and a ranking, and compare like against like with
-`--benchmark-compare` on the same machine.
+These are absolute figures on one noisy box, where a mean can move 15% between runs, so the
+per-row percentages above are worth less than the shape of the table. Treat them as an order of
+magnitude and a ranking, and compare like against like with `--benchmark-compare` on the same
+machine.
 """
 
 from __future__ import annotations

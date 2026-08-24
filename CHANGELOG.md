@@ -112,6 +112,24 @@ in; the remaining function tiers and the evaluation budget are not.
   declared and not yet charged.
 - `FunctionError`, for a registry function to say what is wrong with the values it was given. It
   carries a message and nothing else, and the evaluator adds the position.
+- **A shared step budget**, the only limit here that bounds *work* rather than shape. One counter
+  per evaluation, decremented on every node evaluated plus each function's declared cost, raising
+  `BudgetExceededError` when it runs out. Default 6,000,000 steps, set per evaluator with
+  `Evaluator(budget=...)`; there is no value meaning unlimited.
+  - **Shared across nested lazy evaluations rather than per level**, which is the whole point:
+    a per-level counter bounds each level to N and lets two levels do N*N work, and
+    `map(a, where(b, _ == _2))` is that shape from a thirty-character source. `LazyExpr` hands
+    the same run state back to the evaluator, so the sharing is structural and there is nothing
+    to remember to thread through.
+  - **A counter, never a timer.** No `signal`, no `threading`, no `concurrent.futures`, asserted
+    by a test that reads the imports of every shipped module. `signal.alarm` is main-thread-only
+    and POSIX-only and an executor timeout leaks the thread that is still running; a counter
+    gives the same answer on the same input on every platform and inside any thread.
+  - Every evaluation starts from the full budget, so an evaluator does not degrade over its
+    lifetime and threads sharing one cannot spend each other's allowance.
+  - The cost is real and measured: roughly 10 to 17% on evaluation-heavy expressions, about 30ns
+    per node against roughly 80ns for the dispatch beside it. `tests/benchmarks/` records the
+    before and after side by side.
 - Benchmarks and allocation ceilings for the tier's hot paths, in `tests/benchmarks/`. They need
   `uv sync --frozen --group measure` and are skipped when those tools are absent, so the
   interpreter matrix stays green with nothing but pytest and hypothesis installed.
@@ -125,10 +143,14 @@ in; the remaining function tiers and the evaluation budget are not.
 ### Known limitations
 - **Only the collections tier exists.** The types, strings, dates and URL tiers are not built, so
   `int`, `lower`, `split`, `default`, `matches`, `parse_iso` and `url_host` are not available.
-- **No evaluation budget.** A deeply nested expression over a large context is bounded only by
-  the source-length cap, the expression depth limit and the power cap, so evaluation time is not
-  yet bounded by anything proportional to the work done. A `where` over a million-row context is
-  a million evaluations and nothing stops it.
+- **The budget bounds evaluation, not every kind of work.** A registry function that loops in C
+  rather than re-evaluating an expression is charged its declared cost once, however many items
+  it walks, so `sum` over ten million integers costs the same as `sum` over ten. That matters
+  much less than it sounds, because the unbounded shape is the nested lazy and that is charged
+  per item; a single pass over ten million integers is a fraction of a second. Folding result
+  size into the charge is the memory-amplification policy's business.
+- **No memory bound.** `extend` and `merge` on large inputs allocate proportionally to them and
+  nothing caps the total.
 - **`merge` is shallow.** Nested mappings are replaced rather than combined. A deep merge needs a
   depth guard and cycle detection over host data, which is not built.
 - **Data functions are guarded where Python raises, not where it crashes.** Sorting, comparing

@@ -40,6 +40,12 @@ rules.evaluate(
 because a registered name is reserved on the right of a `|`: with `first` registered,
 `flags | first` calls it whatever the context says `first` is.
 
+Every evaluation runs under a **step budget**: one counter, decremented per node evaluated,
+shared across nested evaluation, raising `BudgetExceededError` rather than running on. It is a
+counter and not a timer, so it needs no `signal`, no thread and no executor, gives the same
+answer on every platform and inside any thread, and bounds a filter over a context of any size.
+Set it with `Evaluator(budget=...)`; the default is six million steps.
+
 The string, type, date and URL functions are not built yet. The `CHANGELOG.md` "Known
 limitations" section is kept current with exactly what does and does not exist.
 
