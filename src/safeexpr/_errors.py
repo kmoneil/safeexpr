@@ -156,6 +156,36 @@ class BudgetExceededError(SafeExprError):
         self.budget = budget
 
 
+class ReservedNameError(SafeExprError):
+    """A context key collided with a registry function on the right of a pipe.
+
+    **Not an `EvaluationError`, because it is not the expression author's mistake.** The rule is
+    correct and the expression is well-formed; what is wrong is that the host's data and the
+    host's registry both claim a name, and only the host can fix it. A caller that catches
+    `EvaluationError` to report "your rule is wrong" would be blaming the wrong person, so this
+    sits beside it rather than under it.
+
+    The collision is narrow by design. Registry membership is what tells the pipe transform that
+    a `|` is a pipe rather than bitwise-or, and that decision never consults the context, so
+    `flags | first` calls the function whatever `first` means in the data. Every other position is
+    unambiguous: a bare `first` reads the context, and `first(x)` can only ever mean the function
+    because a context value cannot be called at all.
+    """
+
+    def __init__(
+        self, name: str, *, source: str = "", lineno: int | None = None, offset: int | None = None
+    ) -> None:
+        super().__init__(
+            f"`{name}` is both a function and a key in the data, and on the right of a `|` the "
+            f"function always wins, so the data's `{name}` cannot be reached here; rename the "
+            f"key, or write `bitor(a, b)` if bitwise or was meant",
+            source=source,
+            lineno=lineno,
+            offset=offset,
+        )
+        self.name = name
+
+
 class InternalError(SafeExprError):
     """Something raised that this package did not anticipate.
 

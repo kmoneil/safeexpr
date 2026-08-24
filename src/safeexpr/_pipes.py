@@ -68,6 +68,43 @@ def _piped_call(node: ast.BinOp, functions: Container[str]) -> ast.Call | None:
     return None
 
 
+def shadowed_pipes(tree: ast.Expression, names: Container[str]) -> list[ast.BinOp]:
+    """Every `|` in `tree` whose right-hand name is one of `names`.
+
+    Read-only, and separate from `transform` on purpose: the transform must never consult the
+    context, because a rule that did would make an expression mean different things on different
+    data. This does not change any decision, it reports one that has already been made, and it
+    runs before the rewrite because afterwards `x | first` and `first(x)` are the same tree.
+
+    Walked with an explicit stack, like everything else here: a 2047-byte source holds a
+    1023-stage pipe chain.
+
+    Args:
+        tree: A parsed expression, before the rewrite.
+        names: The names to look for.
+
+    Returns:
+        The offending `BinOp` nodes, in the order found, so a caller can report a position.
+    """
+    found: list[ast.BinOp] = []
+    stack: list[ast.AST] = [tree]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+            right = node.right
+            named = (
+                right.id
+                if isinstance(right, ast.Name)
+                else right.func.id
+                if isinstance(right, ast.Call) and isinstance(right.func, ast.Name)
+                else None
+            )
+            if named is not None and named in names:
+                found.append(node)
+        stack.extend(ast.iter_child_nodes(node))
+    return found
+
+
 def _slots(tree: ast.Expression) -> list[_Slot]:
     """Every node in `tree`, paired with where it sits in its parent.
 
