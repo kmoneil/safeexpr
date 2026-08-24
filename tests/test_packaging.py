@@ -117,6 +117,20 @@ def test_the_sdist_ships_the_corpus_and_the_tests(config: dict) -> None:
         assert required in include, f"sdist would not ship {required}"
 
 
+def test_the_sdist_ships_what_the_shipped_suite_reads(config: dict) -> None:
+    """`docs/` and `examples/` are inputs to the suite, not decoration beside it.
+
+    `tests/test_docs.py` evaluates every expression example and runs every code block in `docs/`;
+    `tests/test_examples.py` runs every program in `examples/` as a subprocess. Both ship, because
+    `tests/` ships. An sdist carrying those two files without the directories they read is an sdist
+    whose suite fails on a downstream packager's machine for a reason that has nothing to do with
+    their build, which is the same defect the `sdist` lane was written to catch.
+    """
+    include = config["tool"]["hatch"]["build"]["targets"]["sdist"]["include"]
+    for required in ("/docs", "/examples"):
+        assert required in include, f"sdist would not ship {required}, and the suite reads it"
+
+
 def test_the_changelog_has_a_section_for_the_packaged_version() -> None:
     """Either a heading for the packaged version, or `Unreleased` before the first tag.
 
@@ -179,7 +193,7 @@ PRIVATE_PATH = re.compile(r"(?<![A-Za-z0-9])_(" + "|".join(PRIVATE_NAMES) + r")/
 CARD_ID = re.compile(r"\bSE-\d{3}\b")
 
 # Everything the sdist include list names, which is exactly what a user downloads.
-SHIPPED = ("src", "tests", "corpus", "scripts")
+SHIPPED = ("src", "tests", "corpus", "scripts", "docs", "examples")
 SHIPPED_FILES = ("README.md", "CHANGELOG.md", "THREAT-MODEL.md", "SECURITY.md", "pyproject.toml")
 
 

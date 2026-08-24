@@ -244,6 +244,36 @@ class TestTheShippedDocstringsRun:
         assert attempted > 0, "no doctests found, so this test proves nothing"
 
 
+class TestTheFrontPagePointsAtWhatExists:
+    """The README grew a hero, a documentation table and a list of runnable commands. Each of
+    those is a claim about a file, and a front page pointing at nothing is the first thing a
+    reader finds."""
+
+    def test_the_banner_image_is_there(self, readme: str) -> None:
+        found = re.search(r'<img src="([^"]+)" alt="safeexpr"', readme)
+        assert found is not None, "the banner image is gone"
+        assert (ROOT / found.group(1)).is_file(), f"the banner points at nothing: {found.group(1)}"
+
+    def test_the_documentation_table_lists_every_guide(self, readme: str) -> None:
+        listed = set(re.findall(r"\]\((docs/[a-z-]+\.md)\)", readme))
+        present = {
+            f"docs/{path.name}" for path in (ROOT / "docs").glob("*.md") if path.name != "README.md"
+        }
+        assert present - listed == set(), (
+            f"guides the README does not link: {sorted(present - listed)}"
+        )
+
+    def test_every_example_command_on_the_front_page_exists(self, readme: str) -> None:
+        for named in re.findall(r"python (examples/[a-z_]+\.py)", readme):
+            assert (ROOT / named).is_file(), f"the README runs {named}, which is not there"
+
+    def test_the_example_count_in_the_prose_is_the_count_on_disk(self, prose: str) -> None:
+        total = len(list((ROOT / "examples").glob("*.py")))
+        assert f"{_spelled(total).capitalize()} programs" in prose, (
+            f"there are {total} examples, and the README says otherwise"
+        )
+
+
 class TestTheDocumentItself:
     def test_relative_links_resolve(self, readme: str) -> None:
         for target in relative_link_targets(readme):
