@@ -46,8 +46,15 @@ counter and not a timer, so it needs no `signal`, no thread and no executor, giv
 answer on every platform and inside any thread, and bounds a filter over a context of any size.
 Set it with `Evaluator(budget=...)`; the default is six million steps.
 
-The string, type, date and URL functions are not built yet. The `CHANGELOG.md` "Known
-limitations" section is kept current with exactly what does and does not exist.
+Forty functions across five tiers: collections, types, strings, dates and URL. `matches` is the
+one still to come, because regular expressions need a static ReDoS gate rather than an
+input-length cap. Two things worth knowing before you reach for them: `str` converts primitives
+and refuses arbitrary objects, because converting one would run that object's own code to produce
+the text, and `slugify` is ASCII in core, so a script with no ASCII form is dropped rather than
+transliterated.
+
+The `CHANGELOG.md` "Known limitations" section is kept current with exactly what does and does
+not exist.
 
 The `Development Status :: 3 - Alpha` classifier stays until the escape corpus ships and passes
 on every supported interpreter, because that corpus is the security claim.

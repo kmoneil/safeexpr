@@ -236,7 +236,7 @@ ban-relative-imports = "parents"
 # `scripts/` inverts T20: printing the lane table *is* what the runner does, so "no print" there
 # would be a rule against the program.
 "scripts/**" = ["T20", "S603"]
-# ANN401 forbids `typing.Any`, and it is right almost everywhere. It is wrong in these two.
+# ANN401 forbids `typing.Any`, and it is right almost everywhere. It is wrong in these.
 # They evaluate a dynamically-typed expression language: the type of a value *is* whatever the
 # expression produced, and the node handlers and the registry tiers take and return exactly that.
 # Annotating them `object` would be no more truthful and would push a cast onto every caller. The
@@ -244,7 +244,12 @@ ban-relative-imports = "parents"
 # annotation. It also stays on for `_registry.py`, whose own signatures are about entries rather
 # than about values.
 "src/safeexpr/_eval.py" = ["ANN401"]
+"src/safeexpr/_guards.py" = ["ANN401"]
 "src/safeexpr/_collections.py" = ["ANN401"]
+"src/safeexpr/_types.py" = ["ANN401"]
+"src/safeexpr/_strings.py" = ["ANN401"]
+"src/safeexpr/_dates.py" = ["ANN401"]
+"src/safeexpr/_urls.py" = ["ANN401"]
 "tests/**" = ["D", "ANN", "S101", "S603", "S607", "PLR2004", "T20"]
 
 # ---------------------------------------------------------------------------

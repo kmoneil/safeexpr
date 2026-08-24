@@ -87,6 +87,16 @@ class _HostileEq:
         raise self._raises
 
 
+class _Talkative:
+    """A host object whose text form carries a secret. Nothing may ever ask it for one."""
+
+    def __str__(self) -> str:  # pragma: no cover - reaching this is the failure
+        return "sk-live-LEAKED-THROUGH-STR"
+
+    def __repr__(self) -> str:  # pragma: no cover - reaching this is the failure
+        return "sk-live-LEAKED-THROUGH-REPR"
+
+
 def _a_lazy_expression() -> Any:
     """Build a real `LazyExpr` over a subtree, for the F8 entries to probe."""
     tree = parse("_.secret > 1")
@@ -128,6 +138,10 @@ def _contexts() -> dict[str, dict[str, Any]]:
             "x": {"k": 1},
         },
         "object": {"obj": _Plain(), "x": _Plain()},
+        # F1: an object that *talks*. `_Plain` has no `__str__`, so converting one would produce
+        # a bland default and prove nothing; this one puts the secret in the text it returns, so
+        # an entry that reached `__str__` would show it.
+        "talkative": {"obj": _Talkative()},
         "hostile_systemexit": {"x": _HostileEq(SystemExit)},
         "hostile_keyboardinterrupt": {"x": _HostileEq(KeyboardInterrupt)},
         # F8: a LazyExpr placed directly in the context, which is a stronger test than

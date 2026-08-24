@@ -65,6 +65,14 @@ in; the remaining function tiers and the evaluation budget are not.
   corpus of nothing but rejections would pass against a sandbox that refuses everything.
 
 ### Fixed
+- **Sequence repetition had no cap at all.** `"a" * 5000000` allocated a five-megabyte string and
+  `[0] * 5000000` a five-million-item list, from fifteen characters of expression, and the
+  constant was free to be larger. No existing limit saw it: the source cap bounds the expression,
+  the step budget bounds nodes evaluated and that expression is three, and the power cap bounds
+  the width of an integer rather than the length of a sequence. R7 had listed a string length cap
+  among the deterministic bounds and it had never been built. Now guarded on the predicted size,
+  because an error raised after the allocation has already cost the allocation, and shared with
+  `replace`, `join` and `slugify` so text and repetition cannot drift apart.
 - **A function given the wrong *kind* of value was told it could not accept that many
   arguments.** Both failures reach the evaluator as `TypeError` and it could not tell them
   apart, so it reported the one it could name, which was a false statement about a call whose
@@ -112,6 +120,31 @@ in; the remaining function tiers and the evaluation budget are not.
   declared and not yet charged.
 - `FunctionError`, for a registry function to say what is wrong with the values it was given. It
   carries a message and nothing else, and the evaluator adds the position.
+- **The types, strings, dates and URL tiers**, completing the registry at 40 functions:
+  `int, float, str, bool, is_none, default`; `lower, upper, strip, split, join, replace,
+  starts_with, ends_with, contains, slugify`; `parse_iso, format_date`; `url_host, url_path,
+  url_query`. Still stdlib-only, and no core function needs an extra.
+  - **`str` converts primitives and refuses everything else.** `str(x)` on an arbitrary object
+    runs that object's `__str__`, which is host code returning host text, so a rules engine that
+    allowed it would publish whatever that object's author chose to print. The corpus already
+    carried the same leak arriving as `"%s" % obj`; arriving through a friendly conversion does
+    not make it a different leak.
+  - **`format_date` formats through `strftime` and nothing that interprets a template**, which
+    is the card's own requirement and F1's most-repeated shape. Its directives are an allowlist
+    rather than whatever the platform's C library accepts, so `%c`, `%x`, `%s` and `%-d` are
+    refused and output does not vary with libc across the interpreter matrix.
+  - Nothing coerces. `lower(user.age)` is a mistake in the rule, and answering it with `"30"`
+    hides the mistake until the field arrives missing rather than numeric.
+  - `float` refuses infinity and not-a-number, including the infinity a large literal overflows
+    to. They compare in ways nobody means: `float(_.x) > 100` against `"nan"` is silently false
+    for every row.
+  - `slugify` is ASCII in core and lossy about it. Accented Latin keeps its base letter, `café`
+    slugging to `cafe`, and a script with no ASCII form is dropped: a title written entirely in
+    Greek or Japanese slugs to nothing. Word boundaries around dropped characters survive, so
+    `a日b` is `a-b`. The `unicode` extra is the upgrade.
+  - `url_host` gives the hostname rather than the network location, so a port or credentials do
+    not silently make `url_host(u) == "example.com"` false. `url_query` gives one value per name,
+    first occurrence winning, so the common comparison is not against a list.
 - **A shared step budget**, the only limit here that bounds *work* rather than shape. One counter
   per evaluation, decremented on every node evaluated plus each function's declared cost, raising
   `BudgetExceededError` when it runs out. Default 6,000,000 steps, set per evaluator with
@@ -141,8 +174,14 @@ in; the remaining function tiers and the evaluation budget are not.
   bug. It is now a validation error naming the depth and the limit.
 
 ### Known limitations
-- **Only the collections tier exists.** The types, strings, dates and URL tiers are not built, so
-  `int`, `lower`, `split`, `default`, `matches`, `parse_iso` and `url_host` are not available.
+- **No `matches`.** Regular expressions are the one function left, and they wait on a static
+  ReDoS gate: `^(a+)+$` takes seconds against a 29-character input, so an input-length cap is not
+  the mitigation.
+- **`slugify` is ASCII and lossy.** Text in a script with no ASCII form slugs to nothing at all.
+  Transliteration is the `unicode` extra's job and the extra is declared but empty.
+- **Reading a field off a parsed timestamp needs the host to opt in.** `parse_iso` returns a
+  `datetime`, which compares and formats; `.year` needs `attribute_types`, because attribute
+  access reaching arbitrary objects is the thing this package most deliberately does not do.
 - **The budget bounds evaluation, not every kind of work.** A registry function that loops in C
   rather than re-evaluating an expression is charged its declared cost once, however many items
   it walks, so `sum` over ten million integers costs the same as `sum` over ten. That matters

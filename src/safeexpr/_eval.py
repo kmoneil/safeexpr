@@ -35,6 +35,7 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any, ClassVar
 
 from ._errors import BudgetExceededError, EvaluationError, SafeExprError, contained
+from ._guards import MAX_RESULT_SIZE
 from ._parse import parse
 from ._pipes import transform
 from ._registry import Function, FunctionError, as_function, describe_type
@@ -226,6 +227,22 @@ def _checked_budget(budget: object) -> int:
         message = f"budget must be a positive integer, got {budget!r}"
         raise ValueError(message)
     return budget
+
+
+def _repetition_size(left: Any, right: Any) -> int | None:
+    """How long `left * right` would be, if this is sequence repetition.
+
+    Args:
+        left: The left operand.
+        right: The right operand.
+
+    Returns:
+        The resulting length, or `None` if `*` here is ordinary arithmetic.
+    """
+    for repeated, count in ((left, right), (right, left)):
+        if isinstance(repeated, (str, bytes, bytearray, list, tuple)) and isinstance(count, int):
+            return len(repeated) * count
+    return None
 
 
 def _suggest(name: str, candidates: Sequence[str]) -> str:
@@ -514,6 +531,25 @@ class Evaluator:
                 "`%` on text means string formatting, which can read attributes and keys that "
                 "this language does not allow; use `+` or `join` to build strings",
             )
+
+        # **`*` on a sequence is repetition, and repetition had no cap at all.** R7 lists a
+        # string length cap among the deterministic bounds and it had never been built, which
+        # left a hole the step budget cannot see: the budget counts *nodes evaluated*, and
+        # `"a" * 5000000` is three nodes. Measured against this evaluator before the guard
+        # existed, that expression allocated five megabytes and the constant was free to be
+        # larger; `[0] * 5000000` did the same with a list.
+        #
+        # Guarded on the predicted length rather than on the operands, for the same reason `**`
+        # is guarded on the width of its result: an error after the allocation has already cost
+        # the allocation.
+        if isinstance(node.op, ast.Mult):
+            size = _repetition_size(left, right)
+            if size is not None and size > MAX_RESULT_SIZE:
+                raise _error(
+                    run,
+                    node,
+                    f"`*` would produce {size:,} items, over the limit of {MAX_RESULT_SIZE:,}",
+                )
 
         op = _BINOPS[type(node.op)]
         symbol = _OP_SYMBOLS.get(type(node.op), "?")
