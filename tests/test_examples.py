@@ -194,7 +194,13 @@ class TestTheClaimsTheExamplesExistToMake:
         assert "['refused', 'answered', 'refused', 'answered', 'refused', 'answered']" in stdout
         # The registry was copied rather than held, proven by mutating the caller's dict.
         assert "len([1, 2, 3])   -> 3" in stdout
-        assert "no __dict__ for setting new attributes" in stdout
+        # Both assignments refused, and the *promise* rather than CPython's wording for it:
+        # 3.12 and 3.13 word the `__slots__` AttributeError differently, and pinning the 3.13
+        # sentence failed `compat (3.12)` on a claim the package does not make.
+        assert stdout.count("-> AttributeError:") == 2
+        assert "it worked, which it must not" not in stdout
+        assert "nothing was attached: True" in stdout
+        assert "the budget is unchanged: True" in stdout
 
     def test_attributes_shows_that_an_attribute_can_run_code(self, outputs: dict[str, str]):
         stdout = outputs["attributes"]
