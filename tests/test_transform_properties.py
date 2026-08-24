@@ -19,7 +19,10 @@ different tree is run.
 from __future__ import annotations
 
 import ast
+import collections
 import contextlib
+import types
+from collections.abc import Iterator, Mapping
 from typing import Any
 
 import pytest
@@ -365,3 +368,170 @@ class TestTheGeneratorKeepsProducingTheShapes:
         counts = self._shapes()
         thin = {shape: count for shape, count in counts.items() if count < 10}
         assert not thin, f"barely produced: {thin}"
+
+
+class _NotADict(Mapping):
+    """A `collections.abc.Mapping` that is not a `dict`, for the mapping-kind differential.
+
+    A near-twin of `tests/test_eval.py::_CustomMapping`, kept local so this module's generator and
+    the properties over it stay readable in one file.
+    """
+
+    def __init__(self, pairs: Mapping[str, Any]) -> None:
+        self._pairs = dict(pairs)
+
+    def __getitem__(self, key: str) -> Any:
+        return self._pairs[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._pairs)
+
+    def __len__(self) -> int:
+        return len(self._pairs)
+
+
+# The seven mapping kinds a host might realistically put in a context, as constructors over a
+# plain dict. Three are `dict` subclasses and three are not, which is exactly the split the
+# guard in `_attribute` straddles.
+#
+# `defaultdict` is built **without a factory**, so a missing key raises like a dict rather than
+# being created on read. That is not tidying an inconvenience away: `defaultdict(lambda: None)`
+# and `Counter` both answer a missing key themselves, and comparing them against `dict` on a
+# missing field would be measuring their `__missing__` rather than this package's guard.
+MAPPING_KINDS: dict[str, Any] = {
+    "dict": dict,
+    "OrderedDict": collections.OrderedDict,
+    "Counter": collections.Counter,
+    "defaultdict": lambda pairs: collections.defaultdict(None, pairs),
+    "ChainMap": lambda pairs: collections.ChainMap(dict(pairs)),
+    "MappingProxyType": lambda pairs: types.MappingProxyType(dict(pairs)),
+    "custom": _NotADict,
+}
+
+# The kinds whose *lookup* is a dict's, which is what a differential against `dict` can compare.
+#
+# `Counter` is the one exclusion and it is excluded for a reason worth stating, because "the
+# differential covers six of seven" otherwise reads as a gap. `Counter.__missing__` returns 0, so
+# `c["absent"]` is a value rather than a `KeyError` and no expression that reaches a missing key
+# can agree with `dict`. That is the standard library's decision about its own mapping, arrived at
+# through `value[key]` exactly as `d["k"]` does in ordinary Python, and this package neither
+# overrides it nor should. It stays in `MAPPING_KINDS` above, where the tests that read a key it
+# *has* still cover it, and its divergence is pinned by
+# `test_a_mapping_that_answers_a_missing_key_is_allowed_to`.
+DICT_LOOKUP_KINDS: dict[str, Any] = {
+    kind: build for kind, build in MAPPING_KINDS.items() if kind != "Counter"
+}
+
+
+def _as_kind(value: Any, build: Any) -> Any:
+    """Rebuild every mapping inside `value` with `build`, leaving everything else alone."""
+    if isinstance(value, Mapping):
+        return build({key: _as_kind(item, build) for key, item in value.items()})
+    if isinstance(value, list):
+        return [_as_kind(item, build) for item in value]
+    return value
+
+
+# What a mapping's type is *called*, for scrubbing it out of an error message. `describe_type`
+# names the type the host actually passed, which is right for the reader and wrong for a
+# differential across seven types: `first` on a mapping says "needs a list, got `OrderedDict`",
+# and that is the mapping kind talking rather than the guard.
+_KIND_NAMES = (
+    "OrderedDict",
+    "defaultdict",
+    "ChainMap",
+    "mappingproxy",
+    "_NotADict",
+    "Counter",
+    "dict",
+)
+
+
+def _plain(value: Any) -> Any:
+    """Every mapping in `value` as a plain dict, so containers compare by their contents.
+
+    Needed because the kinds do not agree about equality among themselves: `OrderedDict(a=1)`
+    equals `{"a": 1}` and `ChainMap({"a": 1})` does not, since `MutableMapping` defines no
+    `__eq__`. The differential is about what the evaluator produced, not about which container
+    the host handed it.
+    """
+    if isinstance(value, Mapping):
+        return {key: _plain(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_plain(item) for item in value]
+    return value
+
+
+def _scrubbed(message: str) -> str:
+    """`message` with any mapping type name replaced, so only the wording is compared."""
+    for name in _KIND_NAMES:
+        message = message.replace(f"`{name}`", "`<mapping>`")
+    return message
+
+
+def _outcome(evaluator: Evaluator, source: str, context: dict[str, Any]) -> Any:
+    """The value, or a comparable description of the refusal."""
+    try:
+        return ("value", _plain(evaluator.evaluate(source, context)))
+    except SafeExprError as error:
+        return ("error", type(error).__name__, _scrubbed(str(error)))
+
+
+class TestTheMappingKindDoesNotChangeTheAnswer:
+    """The guard in `_attribute` straddles seven mapping kinds, and must not notice.
+
+    `_attribute` tests the concrete type before the ABC, so a plain `dict` takes a different
+    branch of one `isinstance` call from a `ChainMap`. That is a performance decision and it must
+    not be a semantic one, so the property is that every kind produces the same answer, value or
+    refusal, over generated trees rather than over a handful of hand-picked ones.
+
+    The failure this catches is the guard being simplified to its concrete half, which would keep
+    every `dict` in every other test working and stop a `ChainMap` in production.
+    """
+
+    @given(source=TREES)
+    @settings(max_examples=200, deadline=None, suppress_health_check=[HealthCheck.too_slow])
+    def test_every_mapping_kind_agrees_with_a_plain_dict(self, source: str) -> None:
+        evaluator = Evaluator(registry=standard_registry())
+        expected = _outcome(evaluator, source, _as_kind(CONTEXT, dict))
+        for kind, build in DICT_LOOKUP_KINDS.items():
+            actual = _outcome(evaluator, source, _as_kind(CONTEXT, build))
+            assert actual == expected, f"{kind} disagreed with dict on `{source}`"
+
+    def test_the_kinds_really_are_split_across_the_guard(self) -> None:
+        """A differential over seven aliases of `dict` would prove nothing."""
+        built = {kind: build({"a": 1}) for kind, build in MAPPING_KINDS.items()}
+        concrete = {kind for kind, value in built.items() if isinstance(value, dict)}
+        assert concrete == {"dict", "OrderedDict", "Counter", "defaultdict"}
+        assert all(isinstance(value, Mapping) for value in built.values())
+
+    def test_a_missing_field_reads_the_same_on_every_kind(self) -> None:
+        """Not reachable from `TREES`, which only names fields the rows carry, so it is asserted
+        directly: the "no field" message and its did-you-mean text come from the mapping's keys
+        and must not vary with the mapping's type.
+
+        **`Counter` is excluded, and that is its behaviour rather than ours.** `Counter.__missing__`
+        returns 0, so `c["kk"]` is a value and not a `KeyError`, and `_attribute` never reaches
+        its "no field" branch at all. Including it here would assert that this package overrides
+        a standard-library mapping's own lookup, which it does not and must not: the mapping
+        answers, and whatever it answers is the value. Pinned below rather than left implicit.
+        """
+        evaluator = Evaluator(registry=standard_registry())
+        outcomes = {
+            kind: _outcome(evaluator, "rec.plann", {"rec": build({"plan": 1})})
+            for kind, build in DICT_LOOKUP_KINDS.items()
+        }
+        assert len(set(outcomes.values())) == 1, outcomes
+        assert "no field `plann`, did you mean `plan`?" in outcomes["dict"][2]
+
+    def test_a_mapping_that_answers_a_missing_key_is_allowed_to(self) -> None:
+        """The other half of the exclusion above, so it is a documented property and not a gap.
+
+        `_attribute` does `value[node.attr]` and reports "no field" only when that raises. A
+        `Counter` returning 0 and a `defaultdict` inserting a default are both the mapping
+        deciding, which is the same thing that happens through `d["k"]` in ordinary Python.
+        """
+        evaluator = Evaluator(registry=standard_registry())
+        assert evaluator.evaluate("c.absent", {"c": collections.Counter({"k": 1})}) == 0
+        filled: Any = collections.defaultdict(lambda: "made up", {"k": 1})
+        assert evaluator.evaluate("d.absent", {"d": filled}) == "made up"

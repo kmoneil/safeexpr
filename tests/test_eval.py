@@ -7,19 +7,48 @@ check: the question each one asks is whether a path exists at all.
 from __future__ import annotations
 
 import ast
+import collections
 import os
 import threading
 import time
+import types
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from safeexpr import EvaluationError, Evaluator, SafeExprError, evaluate
+import safeexpr._eval as eval_module
+from safeexpr import EvaluationError, Evaluator, SafeExprError, evaluate, standard_registry
 from safeexpr._eval import MAX_POWER_RESULT_BITS
 from safeexpr._guards import MAX_RESULT_SIZE
 
 SRC_DIR = Path(__file__).resolve().parent.parent / "src" / "safeexpr"
+
+
+class _CustomMapping(Mapping):
+    """A `collections.abc.Mapping` that is not a `dict` and never will be.
+
+    It carries a real attribute called `api_key`, so a guard that ever let a mapping fall through
+    to the `getattr` branch would answer `u.api_key` with the object's attribute instead of "no
+    field". That is the difference between data access and object access, and it is the whole of
+    F2's first step. Named to match `tests/test_thread_safety.py`, which uses the same shape for
+    the same reason.
+    """
+
+    api_key = "sk-live-must-not-become-reachable"
+
+    def __init__(self, pairs: Mapping[str, Any]) -> None:
+        self._pairs = dict(pairs)
+
+    def __getitem__(self, key: str) -> Any:
+        return self._pairs[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._pairs)
+
+    def __len__(self) -> int:
+        return len(self._pairs)
 
 
 class TestCanonicalUseCases:
@@ -546,3 +575,216 @@ class TestRegressions:
         one can multiply it."""
         with pytest.raises(EvaluationError):
             evaluate('("a" * 100000) * 100000', {})
+
+
+class TestTheMappingFastPath:
+    """The concrete type is tested before the ABC, and the order is load-bearing.
+
+    `collections.abc.Mapping.__instancecheck__` is Python-level and dispatches into
+    `_abc._abc_instancecheck`; `isinstance(d, dict)` is a C type check. `isinstance` walks a
+    tuple left to right and stops at the first hit, so `(dict, Mapping)` answers a plain dict
+    without ever entering the ABC and `(Mapping, dict)` does not. Both spellings behave
+    identically, which is exactly why a test has to read the line: reversing it would give back
+    the whole measured gain with nothing failing.
+    """
+
+    @staticmethod
+    def _guard() -> ast.expr:
+        """The first `isinstance` test inside `Evaluator._attribute`, read off the source."""
+        tree = ast.parse((SRC_DIR / "_eval.py").read_text(encoding="utf-8"))
+        handler = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "_attribute"
+        )
+        return next(
+            node
+            for node in ast.walk(handler)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "isinstance"
+        )
+
+    def test_the_concrete_type_is_tested_before_the_abc(self) -> None:
+        call = self._guard()
+        assert len(call.args) == 2
+        classes = call.args[1]
+        assert isinstance(classes, ast.Tuple), (
+            "the mapping guard in `_attribute` is no longer a tuple of classes. The point of the "
+            "tuple is that `isinstance` short-circuits on the first entry, so a plain dict never "
+            "reaches `Mapping.__instancecheck__`."
+        )
+        names = [entry.id for entry in classes.elts if isinstance(entry, ast.Name)]
+        assert names == ["dict", "Mapping"], (
+            f"the mapping guard checks {names}, not ['dict', 'Mapping']. `isinstance` stops at "
+            f"the first match, so putting the ABC first pays 99.9ns per attribute per item where "
+            f"the concrete check costs 27.4ns. Measured at 7 to 11% on the collections tier; see "
+            f"tests/benchmarks/test_attribute_path_bench.py."
+        )
+
+    @staticmethod
+    def _abc_checks(context: dict[str, Any], source: str) -> int:
+        """How many times the ABC half of the guard was consulted during one evaluation.
+
+        The counter replaces `_eval`'s module-level `Mapping`, which is the name the guard reads.
+        Counting rather than timing is deliberate, and it is the same move `tests/test_lazy.py`
+        makes one level down: a threshold drifts and gets raised, a call count does not. The
+        whole optimisation is "a plain dict never reaches the ABC", and that is a number rather
+        than a duration.
+        """
+
+        class Probe:
+            checks = 0
+
+            def __instancecheck__(self, other: object) -> bool:
+                type(self).checks += 1
+                return isinstance(other, Mapping)
+
+        probe = Probe()
+        original = eval_module.Mapping
+        eval_module.Mapping = probe  # type: ignore[misc]
+        try:
+            Evaluator(registry=standard_registry()).evaluate(source, context)
+        finally:
+            eval_module.Mapping = original  # type: ignore[misc]
+        return Probe.checks
+
+    def test_a_plain_dict_never_reaches_the_abc(self) -> None:
+        """The optimisation, as a count rather than as a duration."""
+        rows = [{"name": f"row-{n}"} for n in range(200)]
+        assert self._abc_checks({"rows": rows}, "rows | map(_.name)") == 0
+
+    def test_a_mapping_that_is_not_a_dict_still_reaches_the_abc(self) -> None:
+        """The other side of the same count: without this, the test above would pass on a guard
+        that had dropped the ABC half entirely, which is the exact simplification the regression
+        battery below exists to catch."""
+        rows = [collections.ChainMap({"name": f"row-{n}"}) for n in range(200)]
+        assert self._abc_checks({"rows": rows}, "rows | map(_.name)") == 200
+
+    def test_the_reader_would_notice_the_wrong_order(self) -> None:
+        """The test above is only worth what it would catch, so this is what it catches."""
+        reversed_source = "def _attribute(self, node, run):\n    isinstance(v, (Mapping, dict))\n"
+        call = next(
+            node
+            for node in ast.walk(ast.parse(reversed_source))
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "isinstance"
+        )
+        classes = call.args[1]
+        assert isinstance(classes, ast.Tuple)
+        assert [entry.id for entry in classes.elts if isinstance(entry, ast.Name)] != [
+            "dict",
+            "Mapping",
+        ]
+
+
+class TestRegressionsAttributeFastPath:
+    """Every mapping kind a host might realistically pass still reads its keys.
+
+    The failure mode this battery exists for is somebody simplifying the guard down to its
+    concrete half. That is silent and data-dependent: every `dict` in every test would keep
+    working and a `ChainMap` in production would stop.
+    """
+
+    @staticmethod
+    def _mappings(payload: dict[str, Any]) -> dict[str, Any]:
+        """One of each mapping kind, all holding the same pairs."""
+        return {
+            "dict": dict(payload),
+            "OrderedDict": collections.OrderedDict(payload),
+            "Counter": collections.Counter(payload),
+            "defaultdict": collections.defaultdict(lambda: None, payload),
+            "ChainMap": collections.ChainMap(dict(payload)),
+            "MappingProxyType": types.MappingProxyType(dict(payload)),
+            "custom": _CustomMapping(payload),
+        }
+
+    @pytest.mark.parametrize("kind", ["ChainMap", "MappingProxyType", "custom"])
+    def test_regression_attribute_a_non_dict_mapping_still_reads_its_keys(self, kind: str) -> None:
+        """The test that catches the simplification.
+
+        None of these is a `dict` or a subclass of one, so all three reach the mapping branch
+        only through the ABC half of the guard.
+        """
+        value = self._mappings({"plan": "pro"})[kind]
+        assert not isinstance(value, dict), f"{kind} is a dict; it would not test the ABC half"
+        assert evaluate("u.plan", {"u": value}) == "pro"
+
+    @pytest.mark.parametrize("kind", ["OrderedDict", "Counter", "defaultdict"])
+    def test_regression_attribute_a_dict_subclass_reads_its_keys(self, kind: str) -> None:
+        """Dict subclasses take the concrete half, because `isinstance` accepts them.
+
+        Recorded rather than assumed. The fast path was first written as `type(value) is dict`,
+        which would have sent these three through the ABC instead. Interleaved medians put the
+        two spellings inside each other's spread on plain dicts and 7 to 11% apart on rows of
+        `OrderedDict`, so the wider test shipped. Either way the behaviour here is identical,
+        which is what this pins.
+        """
+        value: Any = self._mappings({"plan": 3})[kind]
+        assert isinstance(value, dict)
+        assert evaluate("u.plan", {"u": value}) == 3
+
+    @pytest.mark.parametrize("kind", ["dict", "custom"])
+    def test_regression_attribute_a_missing_field_reports_the_same_message_on_both_paths(
+        self, kind: str
+    ) -> None:
+        """Same wording, same `_suggest` did-you-mean text, whichever half of the guard hit."""
+        value = self._mappings({"plan": "pro", "region": "eu"})[kind]
+        with pytest.raises(EvaluationError) as caught:
+            evaluate("u.plann", {"u": value})
+        message = str(caught.value)
+        assert "no field `plann`" in message
+        assert "did you mean `plan`?" in message
+
+    @pytest.mark.parametrize("kind", ["dict", "ChainMap", "custom"])
+    def test_regression_attribute_a_mapping_key_still_wins_over_a_method(self, kind: str) -> None:
+        """`d.items` is the key "items", never the method, on both halves of the guard.
+
+        The comment above the branch says falling through to `getattr` is how a sandbox exposes
+        `.keys` and `.__class__` on data the host thought was inert. This is that comment as an
+        assertion.
+        """
+        value = self._mappings({"items": [1, 2]})[kind]
+        assert evaluate("d.items", {"d": value}) == [1, 2]
+        with pytest.raises(EvaluationError) as caught:
+            evaluate("d.keys", {"d": value})
+        assert "no field `keys`" in str(caught.value)
+
+    @pytest.mark.parametrize("kind", ["dict", "ChainMap", "custom"])
+    def test_regression_attribute_a_dunder_is_still_blocked_on_both_paths(self, kind: str) -> None:
+        """Refused before `_attribute` runs at all, so the guard's shape cannot affect it.
+
+        Asserted per mapping kind anyway: "the validator catches it" is the claim, and a claim
+        that only holds for one concrete type is not the claim.
+        """
+        value = self._mappings({"plan": "pro"})[kind]
+        with pytest.raises(SafeExprError) as caught:
+            evaluate("u.__class__", {"u": value})
+        assert "attributes beginning with an underscore are blocked" in str(caught.value)
+
+    def test_regression_attribute_a_non_mapping_still_needs_registration(self) -> None:
+        """The `else` half of the guard, unchanged: no mapping, no access without an opt-in."""
+
+        class Point:
+            def __init__(self) -> None:
+                self.x = 3
+
+        with pytest.raises(EvaluationError) as caught:
+            evaluate("p.x", {"p": Point()})
+        assert "registered" in str(caught.value)
+        opened = Evaluator(attribute_types={Point: frozenset({"x"})})
+        assert opened.evaluate("p.x", {"p": Point()}) == 3
+
+    def test_regression_attribute_a_mapping_subclass_cannot_reach_getattr(self) -> None:
+        """A mapping wins the branch outright, so a real attribute never shadows a missing key.
+
+        If the guard were ever reordered so that a mapping could fall through, this is the shape
+        that would start answering with the object instead of the data.
+        """
+        value = _CustomMapping({"plan": "pro"})
+        assert value.api_key == "sk-live-must-not-become-reachable"
+        with pytest.raises(EvaluationError) as caught:
+            evaluate("u.api_key", {"u": value})
+        assert "no field `api_key`" in str(caught.value)
+        assert "sk-live" not in str(caught.value)

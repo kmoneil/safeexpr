@@ -526,7 +526,24 @@ class Evaluator:
         # Mappings first, and for a mapping there is no second option: `d.items` is the key
         # "items", never the dict method. Falling back to `getattr` here is how a sandbox ends up
         # exposing `.keys` and `.__class__` on data the host thought was inert.
-        if isinstance(value, Mapping):
+        #
+        # **The concrete type comes first in the tuple, and that ordering is the optimisation.**
+        # `isinstance` walks a tuple left to right and stops at the first hit, so a plain `dict`
+        # is answered by a C type check and never reaches `Mapping.__instancecheck__`, which is
+        # Python-level and dispatches into `_abc._abc_instancecheck`. Measured on 3.13.15 over
+        # two million calls: `isinstance(d, Mapping)` 99.9ns against `isinstance(d, dict)` 27.4ns.
+        #
+        # This line runs **once per attribute per item**, so a thousand-row `map(_.name)` pays it
+        # a thousand times; `cProfile` over the canonical pipeline put `__instancecheck__` at
+        # ~1,500 calls per evaluation. Worth **7 to 11%** on the collections tier, measured
+        # 2026-08-24 by interleaving the arms within one process and taking medians over fifteen
+        # rounds. A `timeit` of the check in isolation does **not** predict this number;
+        # `tests/benchmarks/test_attribute_path_bench.py` carries the method and the table.
+        #
+        # Swapping the two entries gives all of it back and changes no behaviour, so nothing
+        # would fail. `tests/test_eval.py::TestTheMappingFastPath` reads this line instead of
+        # trusting the comment.
+        if isinstance(value, (dict, Mapping)):
             try:
                 return value[node.attr]
             except (KeyError, TypeError):
