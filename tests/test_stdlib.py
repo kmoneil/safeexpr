@@ -14,6 +14,7 @@ import pytest
 from safeexpr import Evaluator, standard_registry
 from safeexpr._collections import COLLECTIONS
 from safeexpr._dates import DATES
+from safeexpr._regex import REGEX
 from safeexpr._strings import STRINGS
 from safeexpr._types import TYPES
 from safeexpr._urls import URLS
@@ -106,10 +107,10 @@ class TestTheRegistryIsPerCaller:
         the union of the tiers and so would catch a name appearing from nowhere.
         """
         registry = set(standard_registry())
-        for tier in (COLLECTIONS, TYPES, STRINGS, DATES, URLS):
+        for tier in (COLLECTIONS, TYPES, STRINGS, REGEX, DATES, URLS):
             assert set(tier) <= registry
         assert len(registry) == sum(
-            len(tier) for tier in (COLLECTIONS, TYPES, STRINGS, DATES, URLS)
+            len(tier) for tier in (COLLECTIONS, TYPES, STRINGS, REGEX, DATES, URLS)
         )
 
 

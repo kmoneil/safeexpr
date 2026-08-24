@@ -120,6 +120,27 @@ in; the remaining function tiers and the evaluation budget are not.
   declared and not yet charged.
 - `FunctionError`, for a registry function to say what is wrong with the values it was given. It
   carries a message and nothing else, and the evaluator adds the position.
+- **`matches`, with a static gate against catastrophic backtracking.** Patterns are parsed with
+  the standard library's own regex parser and refused *before* they compile if they nest one
+  backtrackable repeat inside another, or repeat an alternation whose branches describe the same
+  language. Compiled patterns are cached.
+  - **Input-length caps are not the mitigation, and that is measured.** `^(a+)+$` against a
+    29-character input takes seven seconds on every supported interpreter, because the blowup is
+    driven by the pattern's structure rather than by the size of the subject. There is no input
+    cap short enough to help and long enough to be useful.
+  - **The step budget cannot help either**, and this is the one place work happens outside it: a
+    `matches` call is one node however long `re` spends inside it. `matches` is priced above
+    every other function to reflect that, and the gate is what actually bounds it.
+  - **Bounded repeats count as nesting.** `^(a{1,20}){1,20}$` has no unbounded quantifier
+    anywhere and is still measurably slow. A rule written for unbounded repeats only, which is
+    what the research proposed, would have let it straight through.
+  - **Atomic groups and possessive quantifiers reset the nesting**, so `^(?>a+)+$` and `^(a++)+$`
+    are accepted where `^(a+)+$` is refused. They were ruled out as a mitigation only because the
+    old floor was 3.10 and they did not exist there; at the 3.11 floor they do, so an author who
+    knows what they are doing can write a nested repeat and have it accepted.
+  - Fails closed. `re._parser` is a private standard-library API, renamed from `sre_parse` in
+    3.11; if it ever moves, every pattern is refused rather than compiled unchecked, and a canary
+    test fails loudly in CI on every supported interpreter.
 - **The types, strings, dates and URL tiers**, completing the registry at 40 functions:
   `int, float, str, bool, is_none, default`; `lower, upper, strip, split, join, replace,
   starts_with, ends_with, contains, slugify`; `parse_iso, format_date`; `url_host, url_path,
@@ -174,9 +195,13 @@ in; the remaining function tiers and the evaluation budget are not.
   bug. It is now a validation error naming the depth and the limit.
 
 ### Known limitations
-- **No `matches`.** Regular expressions are the one function left, and they wait on a static
-  ReDoS gate: `^(a+)+$` takes seconds against a 29-character input, so an input-length cap is not
-  the mitigation.
+- **The regex gate is conservative and refuses some safe patterns.** `(.*)*$` and `(a?)*$` are
+  fast on CPython because `re` optimises them, and both are refused: the optimisation is an
+  implementation detail, and a gate that refuses a pattern which happens to be fast today is
+  worth more than one that accepts a pattern which is slow tomorrow. Write the inner repeat as
+  atomic or possessive to have it accepted.
+- **`matches` is the one function whose work is not bounded by the step budget.** The counter
+  sees one call and `re` does the rest in C. The pattern gate is what bounds it instead.
 - **`slugify` is ASCII and lossy.** Text in a script with no ASCII form slugs to nothing at all.
   Transliteration is the `unicode` extra's job and the extra is declared but empty.
 - **Reading a field off a parsed timestamp needs the host to opt in.** `parse_iso` returns a

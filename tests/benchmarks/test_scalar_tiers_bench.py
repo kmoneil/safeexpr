@@ -18,6 +18,9 @@ written on:
     format_date_each     3,013 us     directive scan plus strftime
     url_host_each        3,382 us
     url_query_each       3,977 us
+    matches_each         1,381 us     gate and compile once, then search per row
+    matches_context_pattern
+                         1,416 us     same, with the pattern arriving as a value
 
 Two of those are worth reading rather than skimming, and both were surprises.
 
@@ -35,9 +38,18 @@ Nothing here does hidden work per row, which is the property worth watching. A r
 table means a per-row function started allocating or re-deriving something it could have done
 once.
 
-These are absolute figures on one noisy box, where a mean can move 15% between runs. Treat them
-as an order of magnitude and a ranking, and compare like against like with `--benchmark-compare`
-on the same machine.
+`matches` costs about what a string call costs, which is the pattern cache doing its job: the
+gate parses and the engine compiles once, and every row after that is a search. Without the
+cache it would be the dearest thing here by a wide margin.
+
+**How much of this table to believe.** Measured on the machine these were written on, two runs of
+*identical code* differed by up to 12% on a single row, and a controlled comparison of one commit
+against the next scattered from -15% to +36% with functions the change never touched moving most
+in both directions. **That noise floor is above the project's 10% regression gate**, so on a box
+like this the gate cannot certify a change on its own: read it alongside whether the change
+plausibly touches the path at all, and re-run before believing a single red row. Treat the
+numbers as an order of magnitude and a ranking, and compare like against like with
+`--benchmark-compare` on an idle machine.
 """
 
 from __future__ import annotations
@@ -79,11 +91,14 @@ def ev() -> Evaluator:
         ("format_date_each", 'rows | map(format_date(parse_iso(_.at), "%Y-%m-%d"))'),
         ("url_host_each", "rows | map(url_host(_.url))"),
         ("url_query_each", "rows | map(url_query(_.url))"),
+        ("matches_each", 'rows | map(matches(_.name, "^.n.c\\\\w+"))'),
+        ("matches_context_pattern", "rows | map(matches(_.name, p))"),
     ],
     ids=lambda value: value if isinstance(value, str) and " " not in value else "",
 )
 def test_scalar_tier_hot_path(benchmark: Any, ev: Evaluator, name: str, source: str) -> None:
     rows = ROWS if name != "default_each" else [{**row, "missing_field": None} for row in ROWS]
     benchmark.group = name
-    result = benchmark(ev.evaluate, source, {"rows": rows})
+    context = {"rows": rows, "p": "^.n.c\\w+"}
+    result = benchmark(ev.evaluate, source, context)
     assert result is not None
