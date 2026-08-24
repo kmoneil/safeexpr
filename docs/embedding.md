@@ -4,8 +4,10 @@ Everything a host has to decide, in the order it comes up.
 
 ## One evaluator, built at startup
 
-`Evaluator` is immutable after construction and safe to share between threads, so the shape that
-works is one instance at import time and a call per record:
+`Evaluator` is fixed after construction and safe to share between threads, so the shape that works
+is one instance at import time and a call per record. It is also the shape that is *fast*: an
+evaluator remembers the compiled form of every source it has seen, so a rule evaluated twice is
+parsed once, and building a fresh evaluator per call throws that away.
 
 ```python
 from safeexpr import Evaluator, standard_registry
@@ -223,7 +225,10 @@ Then nothing is registered, nothing is reachable, and the expression cannot see 
 One `Evaluator` is safe to share between threads, and that is a contract rather than an
 observation. Everything one evaluation needs, the step counter and the `_` scope stack included,
 lives in a call-scoped object, so the budget is per call rather than per evaluator and two threads
-never spend each other's.
+never spend each other's. **No evaluation can observe state left by another**, which is the
+substance of the contract and is a slightly narrower claim than "nothing on the instance ever
+changes": what does change is a memoisation cache, and the paragraph after the example says why
+that is the same promise.
 
 ```python
 from concurrent.futures import ThreadPoolExecutor
@@ -241,9 +246,19 @@ sum(hits)
 ```
 
 Nothing here starts a thread, installs a signal handler, or sets a timeout, so there is no
-interaction with whatever your host already does about any of those. One thing is shared
-process-wide, a bounded cache of compiled regular-expression patterns, and it is invisible to the
-budget: `matches` is charged its declared cost whether the pattern was cached or not.
+interaction with whatever your host already does about any of those.
+
+Two things are cached. Each evaluator remembers the compiled form of the sources it has seen, and a
+bounded cache of compiled regular-expression patterns is shared process-wide. Both are memoisation
+caches and **both are invisible to the budget**: compiling is a pure function of the source and the
+registry, `matches` is charged its declared cost whether the pattern was cached or not, and the
+budget reads the same on a warm cache as on a cold one. The suite proves that by bisecting the
+smallest budget that evaluates in each state rather than by asserting it.
+
+The compiled-expression cache holds 128 entries per evaluator and is dropped whole when it fills.
+If you evaluate more than 128 distinct sources on one evaluator in rotation you will miss every
+time, which costs what this package cost before the cache existed rather than anything worse. If
+you are in that position, more evaluators, each with its own working set, is the shape that helps.
 
 ## Untrusted input
 

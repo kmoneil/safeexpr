@@ -26,12 +26,12 @@ from collections.abc import Iterator, Mapping
 from typing import Any
 
 import pytest
-from hypothesis import HealthCheck, given, settings
+from hypothesis import HealthCheck, assume, given, settings
 from hypothesis import strategies as st
 
 import safeexpr._eval as evaluator_module
-from safeexpr import Evaluator, SafeExprError, standard_registry
-from safeexpr._parse import parse
+from safeexpr import Evaluator, SafeExprError, SourceTooLongError, standard_registry
+from safeexpr._parse import MAX_SOURCE_BYTES, parse
 from safeexpr._pipes import transform
 from safeexpr._validate import validate
 
@@ -226,6 +226,17 @@ class TestValidationAndUseSeeTheSameTree:
     @given(source=TREES)
     @settings(max_examples=300, deadline=None, suppress_health_check=[HealthCheck.too_slow])
     def test_the_validated_tree_is_the_evaluated_tree(self, source: str) -> None:
+        # **`TREES` can draw a source over the 2 KB cap**, and such a source is refused before the
+        # parser runs, so nothing is ever validated and there is no pair of trees to compare. The
+        # property is about what happens to a tree, so a source that never becomes one is outside
+        # it. Stated as a precondition rather than absorbed into the assertion below, which would
+        # have let the property pass on an expression it never actually watched.
+        #
+        # This was latent for as long as the generator has existed: `_piped` nests to depth three
+        # and a deep draw runs to several kilobytes, so the case is rare rather than impossible.
+        # `test_regression_properties_an_over_long_generated_source_is_refused_before_the_parser`
+        # below pins the behaviour the precondition is standing in for.
+        assume(len(source.encode("utf-8")) <= MAX_SOURCE_BYTES)
         seen = self._watched(source)
         assert "validated" in seen, "validation never ran"
         if "evaluated" in seen:
@@ -237,6 +248,25 @@ class TestValidationAndUseSeeTheSameTree:
         """So the property above is not passing because the evaluation half never happens."""
         seen = self._watched("rows | len")
         assert set(seen) == {"validated", "evaluated"}
+
+    def test_regression_properties_an_over_long_generated_source_is_refused_before_the_parser(
+        self,
+    ) -> None:
+        """The case the precondition above exists for, asserted rather than assumed away.
+
+        A source past the cap is refused by `check_source` before `ast.parse` sees it, so the
+        watcher records nothing at all. That is correct behaviour and it is what made the property
+        fail: `seen` was empty and the message said "validation never ran", which was true and had
+        nothing to do with the property.
+
+        Found by hypothesis on a deep draw, and it reproduces on the commit before the compile
+        cache existed, so it is a defect in the property rather than in the cache.
+        """
+        source = "rows | " + " | ".join(["len"] * 400)
+        assert len(source.encode("utf-8")) > MAX_SOURCE_BYTES
+        assert self._watched(source) == {}
+        with pytest.raises(SourceTooLongError):
+            Evaluator(registry=standard_registry()).evaluate(source, CONTEXT)
 
     def test_the_assertion_would_notice_a_swap(self) -> None:
         """Two equal trees are still two objects, so identity is the right comparison and
@@ -535,3 +565,78 @@ class TestTheMappingKindDoesNotChangeTheAnswer:
         assert evaluator.evaluate("c.absent", {"c": collections.Counter({"k": 1})}) == 0
         filled: Any = collections.defaultdict(lambda: "made up", {"k": 1})
         assert evaluator.evaluate("d.absent", {"d": filled}) == "made up"
+
+
+def _full_outcome(evaluator: Evaluator, source: str, context: dict[str, Any]) -> Any:
+    """The value, or the refusal in full: type, message and position.
+
+    Stricter than `_outcome` above, which scrubs the mapping type out of a message because that is
+    the axis it varies. Nothing is scrubbed here: a cached compile and a fresh one must agree on
+    the caret, not only on the wording.
+    """
+    try:
+        return ("value", evaluator.evaluate(source, context))
+    except SafeExprError as error:
+        return (
+            "error",
+            type(error).__name__,
+            str(error),
+            getattr(error, "lineno", None),
+            getattr(error, "offset", None),
+        )
+
+
+class TestCompilingOnceAgreesWithCompilingEveryTime:
+    """The cheapest possible statement of the compile cache, over generated input.
+
+    Everything else about the cache is a property of one implementation. This is the property the
+    cache exists to preserve, and it should be in the suite whatever the implementation turns into:
+    an expression means the same thing on the second call as on the first.
+
+    Positions are compared as well as messages. An error built from a cached tree carries the same
+    `lineno` and `offset` it did when the tree was fresh, or the caret moves on the second call and
+    the only thing that would notice is a reader.
+    """
+
+    @given(source=TREES)
+    @settings(max_examples=200, deadline=None, suppress_health_check=[HealthCheck.too_slow])
+    def test_a_warm_entry_answers_exactly_as_a_cold_one_does(self, source: str) -> None:
+        cold = Evaluator(registry=standard_registry())
+        first = _full_outcome(cold, source, CONTEXT)
+        cold._cache.clear()  # noqa: SLF001
+        assert _full_outcome(cold, source, CONTEXT) == first
+
+    @given(source=TREES)
+    @settings(max_examples=200, deadline=None, suppress_health_check=[HealthCheck.too_slow])
+    def test_the_second_call_agrees_with_the_first(self, source: str) -> None:
+        evaluator = Evaluator(registry=standard_registry())
+        first = _full_outcome(evaluator, source, CONTEXT)
+        for _ in range(3):
+            assert _full_outcome(evaluator, source, CONTEXT) == first
+
+    @given(source=TREES)
+    @settings(max_examples=100, deadline=None, suppress_health_check=[HealthCheck.too_slow])
+    def test_a_shadowing_context_is_refused_on_a_warm_entry_too(self, source: str) -> None:
+        """The per-call half, over generated trees.
+
+        Every generated source pipes into registry names, so a context carrying one of those names
+        must be refused whether the entry was compiled a moment ago for a clean context or not.
+        """
+        evaluator = Evaluator(registry=standard_registry())
+        clean = _full_outcome(evaluator, source, CONTEXT)
+        shadowing = {**CONTEXT, "first": 1, "len": 2, "where": 3, "map": 4, "take": 5, "sort_by": 6}
+        refused = _full_outcome(evaluator, source, shadowing)
+        assert refused[0] == "error", refused
+        assert refused[1] == "ReservedNameError", refused
+        # And the clean context still answers as it did, from the same entry.
+        assert _full_outcome(evaluator, source, CONTEXT) == clean
+
+    def test_the_generated_trees_really_do_carry_a_pipe(self) -> None:
+        """The property above says nothing if the generator stops producing pipes."""
+        assert all(
+            "|" in source
+            for source in ("rows | first", "nums | len")  # a smoke value, not the generator
+        )
+        evaluator = Evaluator(registry=standard_registry())
+        with pytest.raises(SafeExprError):
+            evaluator.evaluate("rows | first", {**CONTEXT, "first": 1})

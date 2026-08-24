@@ -22,8 +22,12 @@ reached:
   which leaves `os` sitting in the sandbox module's own globals; not having it is strictly
   better than naming it.
 
-Per-evaluation state lives in `_Run`, never on the evaluator, so an `Evaluator` is immutable
-after construction and safe to share between threads.
+Per-evaluation state lives in `_Run`, never on the evaluator, so **no evaluation can observe
+state left by another** and one `Evaluator` is safe to share between threads. The evaluator holds
+one piece of mutable state, the compile cache below, and it is a memoisation cache: compiling is a
+pure function of `(source, registry)`, the registry is fixed at construction, and the cache is
+charged nothing by the budget, so a hit and a miss differ only in wall time and the language has
+no clock.
 """
 
 from __future__ import annotations
@@ -48,8 +52,8 @@ from ._guards import (
     concatenated_size,
     size_charge,
 )
-from ._parse import parse
-from ._pipes import shadowed_pipes, transform
+from ._parse import check_source, parse
+from ._pipes import pipe_targets, transform
 from ._registry import Function, FunctionError, as_function, describe_type
 from ._validate import validate
 
@@ -92,6 +96,54 @@ MAX_POWER_RESULT_BITS = 8_388_608
 #
 # `scripts/limits.py` prints this and `tests/test_limits.py` asserts the ratio.
 DEFAULT_STEP_BUDGET = 6_000_000
+
+# **How many compiled expressions one evaluator remembers.**
+#
+# Parsing, rewriting and validating a source depends only on `(source, registry)`, and the
+# registry is fixed at construction, so all of it is work an evaluator can do once. For the flat
+# shapes it is nearly the whole call: a feature flag's eleven steps cost 2.7 us and the call
+# costs 33.1 us, so **91% of it was being redone per evaluation and thrown away**. Measured, and
+# the collections tier is the other end of the same scale: at a thousand rows the fixed cost is
+# under 5% and caching it buys nothing.
+#
+# Bounded rather than a plain dict, and the reason is a number rather than a principle. Measured
+# by `scripts/limits.py`, which prints it beside every other cap:
+#
+#     a typical rule, 49 bytes             4.2 KiB per tree     0.52 MiB at this bound
+#     a 2,046-byte flat literal, the
+#     widest the source cap admits       262.6 KiB per tree    32.83 MiB at this bound
+#
+# The second row is why this is bounded at all. A host that accepts expression text from an
+# untrusted source would otherwise hold an unbounded allocation keyed by attacker-chosen input,
+# which is the denial of service this package exists not to have.
+#
+# **128 rather than `_regex._CACHE`'s 256**, because a compiled tree is up to three orders of
+# magnitude larger than a compiled pattern, and here the ceiling is what sets the number rather
+# than the hit rate. 128 distinct expressions per evaluator is about 25x the design's five
+# canonical use cases; the ceiling it buys is published in `docs/performance.md` beside the other
+# limits, because a bound nobody can read is not a bound anybody can review.
+#
+# **A byte budget over the cached sources was considered and not taken.** It would bound the
+# memory directly rather than by proxy, and tree size does track source size closely enough for
+# it to work (88x for the typical rule, 131x for the widest). It is rejected because it is a
+# policy invented here rather than the one already argued for two modules away, and because the
+# failure it prevents costs 33 MiB in a process that has already handed an attacker the
+# expression text. Recorded so it is a decision rather than an omission.
+#
+# The worst case is worth reading plainly: it needs 128 *distinct* maximum-length flat literals,
+# from a caller who controls the source. The bound is what makes that 33 MiB instead of unbounded.
+#
+# The eviction policy is copied from `_regex._CACHE` rather than invented, including its argument:
+# the whole cache is dropped when it fills, which is cheap and needs no ordering bookkeeping, and
+# the "if full, clear, then insert" sequence is not atomic so two threads can race it. The cost of
+# losing that race is a recompile, which is indistinguishable from a cold cache. A lock there
+# would be contended by every evaluation in the process to prevent an outcome that is already
+# correct.
+MAX_COMPILE_CACHE = 128
+
+# A source compiled once: the validated tree, and the raw material for the per-call shadowed-pipe
+# check. See `Evaluator._compile` for why the second half cannot simply be a decision.
+_Compiled = tuple[ast.Expression, tuple[tuple[str, int, int], ...]]
 
 # Always available, whatever registry a host supplies.
 #
@@ -326,8 +378,16 @@ def _suggest(name: str, candidates: Sequence[str]) -> str:
 class Evaluator:
     """Evaluates expressions against a context.
 
-    Immutable after construction: the registry and the attribute allowlist are fixed, and no
-    evaluation writes to the instance. One `Evaluator` may be shared freely between threads.
+    **Fixed after construction, and no evaluation can observe state left by another.** The
+    registry, the attribute allowlist and the budget are frozen when the evaluator is built, and
+    every piece of per-evaluation state lives in a call-scoped `_Run`. One `Evaluator` may be
+    shared freely between threads.
+
+    The one thing an evaluation writes is the compile cache, and it is a memoisation cache:
+    compiling a source is a pure function of `(source, registry)`, the budget is charged the same
+    number of steps on a hit as on a miss, and the language has no clock, so nothing inside an
+    expression can tell a warm cache from a cold one. `tests/test_thread_safety.py` proves the
+    budget half by bisection rather than by argument, the same way it does for the pattern cache.
 
     Args:
         registry: Name to `Function` (or to a bare callable, for the common case of one with no
@@ -346,7 +406,7 @@ class Evaluator:
         ValueError: If `budget` is not a positive integer.
     """
 
-    __slots__ = ("_attribute_types", "_budget", "_registry")
+    __slots__ = ("_attribute_types", "_budget", "_cache", "_registry")
 
     def __init__(
         self,
@@ -360,6 +420,11 @@ class Evaluator:
             **{name: as_function(name, entry) for name, entry in (registry or {}).items()},
         }
         self._attribute_types: dict[type, frozenset[str]] = dict(attribute_types or {})
+        # Per instance rather than module-level, which makes registry isolation structural: two
+        # evaluators cannot be served each other's grammar because they do not share a dict.
+        # `flags | first` is a call with a registry and bitwise-or without, so a source-keyed
+        # shared cache would have to argue that it never happens instead of making it impossible.
+        self._cache: dict[str, _Compiled] = {}
 
     @property
     def function_names(self) -> frozenset[str]:
@@ -387,21 +452,68 @@ class Evaluator:
             SafeExprError: For every failure. Nothing else escapes, which is what `contained`
                 is for.
         """
-        # Parse, check for a shadowed pipe, rewrite pipes, validate, evaluate. The transform runs
-        # **before** validation so that the tree which is validated is the tree which is
-        # evaluated, with no window between the check and the use. It can only ever produce a
-        # call to a name already in the registry, using subtrees that were already there, so it
-        # cannot launder anything past the allowlist; and it preserves positions, so errors still
-        # point at what the user wrote.
         values = context or {}
-        tree = parse(source)
-        self._refuse_shadowed_pipes(tree, values, source)
-        tree = transform(tree, self._registry)
-        validate(tree, source)
+
+        # **The source cap runs before the cache, for the same reason it runs before the parser.**
+        # A cache keyed on the source would otherwise be the first thing to handle hostile input:
+        # an unhashable argument would come back as a `TypeError` from a dict lookup, and a
+        # multi-megabyte string would be hashed in full before anything decided it was too long.
+        check_source(source)
+
+        entry = self._cache.get(source)
+        if entry is None:
+            # Parse, note the pipe targets, refuse a shadowed pipe, rewrite, validate. Every line
+            # here except the refusal depends only on `(source, registry)`, and the registry is
+            # fixed at construction, so every line except the refusal is what gets kept.
+            #
+            # **The transform runs before validation**, so the tree which is validated is the tree
+            # which is evaluated, with no window between the check and the use. It can only ever
+            # produce a call to a name already in the registry, using subtrees that were already
+            # there, so it cannot launder anything past the allowlist; and it preserves positions,
+            # so errors still point at what the user wrote.
+            #
+            # **`pipe_targets` runs on the pre-transform tree**, because afterwards `x | first`
+            # and `first(x)` are the same tree and the distinction it depends on is gone. It is
+            # given the registry rather than a collision set: which registered names actually
+            # collide with the data is not known here and must not be, or the entry would depend
+            # on a context.
+            #
+            # **The refusal sits between them, and that placement is load-bearing.** It ran ahead
+            # of validation before this cache existed, so a shadowed pipe is reported ahead of an
+            # unrelated validation error in the same expression. Moving it after the compile would
+            # reverse that on the first call and leave it right on every call after, which is a
+            # difference nothing but a cold-cache test would ever see.
+            tree = parse(source)
+            targets = pipe_targets(tree, self._registry)
+            self._refuse_shadowed_pipes(targets, values, source)
+            tree = transform(tree, self._registry)
+            validate(tree, source)
+
+            # **Nothing is stored until every line above has returned.** A source that fails to
+            # parse or fails validation is recompiled, and refused identically, on every call.
+            # Caching the refusal would be sound and caching it as anything else would not, so the
+            # simpler thing is the one that cannot be got wrong.
+            #
+            # If full, drop the lot and start again. Copied from `_regex._CACHE` rather than
+            # invented, along with its argument for why no lock is needed: losing that race costs
+            # a recompile, which is indistinguishable from a cold cache.
+            entry = (tree, targets)
+            if len(self._cache) >= MAX_COMPILE_CACHE:
+                self._cache.clear()
+            self._cache[source] = entry
+        else:
+            # **Per call, and it cannot be otherwise.** This reads the context, so it is a
+            # decision about the data rather than about the source, and the entry holds nothing
+            # that depends on the data. Memoising it would make `flags | first` succeed or refuse
+            # according to which context happened to arrive first, which is the one defect this
+            # cache is most likely to be built with.
+            tree, targets = entry
+            self._refuse_shadowed_pipes(targets, values, source)
+
         return self._run(tree, _Run(values, source, self._budget))
 
     def _refuse_shadowed_pipes(
-        self, tree: ast.Expression, context: Mapping[str, Any], source: str
+        self, targets: tuple[tuple[str, int, int], ...], context: Mapping[str, Any], source: str
     ) -> None:
         """Refuse a `|` whose right-hand name is both a function and a key in the data.
 
@@ -413,39 +525,27 @@ class Evaluator:
         author might reasonably have meant the other thing, since without the registry that `|`
         would be bitwise or.
 
-        Checked before the rewrite, because afterwards `x | first` and `first(x)` are the same
-        tree, and guarded by a set intersection so the common case costs one cheap operation
-        rather than a walk.
+        The walk that finds the candidates happened at compile time; what is left here is the set
+        intersection that was always the cheap part, and it is the half that reads the context.
+        `targets` arrives in source order, so the first match is the one to report.
 
         Args:
-            tree: The parsed expression, before the rewrite.
+            targets: `(name, lineno, col_offset)` per right-of-pipe registry name, in source
+                order, from `_compile`.
             context: The names available to the expression.
             source: The original source, for the error's position.
 
         Raises:
             ReservedNameError: On the first shadowed pipe, in source order.
         """
-        if not context:
+        if not targets or not context:
             return
         shadowed = self._registry.keys() & context.keys()
         if not shadowed:
             return
-        offenders = shadowed_pipes(tree, shadowed)
-        if not offenders:
-            return
-        # **Ordered and positioned by the right-hand name, not by the `BinOp`.** `x | first | last`
-        # parses as `(x | first) | last`, and both of those start at column zero, so sorting on
-        # the operator's own position is a tie that reports whichever the walk happened to find
-        # first. The colliding name is what differs between them, and it is also what the caret
-        # should be pointing at.
-        right = min(
-            (found.right for found in offenders),
-            key=lambda found: (found.lineno, found.col_offset),
-        )
-        name = right.id if isinstance(right, ast.Name) else right.func.id  # type: ignore[attr-defined]
-        raise ReservedNameError(
-            name, source=source, lineno=right.lineno, offset=right.col_offset + 1
-        )
+        for name, lineno, col_offset in targets:
+            if name in shadowed:
+                raise ReservedNameError(name, source=source, lineno=lineno, offset=col_offset + 1)
 
     def _run(self, tree: ast.Expression, run: _Run) -> Any:
         return self._eval(tree.body, run)
@@ -988,11 +1088,35 @@ class Evaluator:
     }
 
 
+# The evaluator behind the module-level `evaluate`, built once and shared by every caller.
+#
+# Named `_SHARED` rather than `_DEFAULT` because `tests/test_limits.py` scans this package for
+# module-level names containing `MAX`, `DEFAULT` or `UNIT` and requires each to have a
+# published basis in `scripts/limits.py`. That scan is deliberately loose and it is right to
+# be: it is the forcing function that stops a number arriving with no argument behind it. This
+# is an object rather than a number, so the honest fix is a name that does not claim to be one.
+#
+# **A fresh `Evaluator` per call would leave the README's headline API permanently cold.** The
+# construction itself is 0.21 us and would not be worth a line on its own; what it costs is the
+# compile cache, which lives on the instance and would therefore be discarded on the way out of
+# every call. That is the difference between 11x and 1x for the one entry point most readers try
+# first.
+#
+# Sound for the same reasons the cache is. It has no registry, so its grammar is the fixed one
+# every caller of this function already shares; it holds nothing mutable but the cache; and it is
+# documented as safe to share between threads, which is what a module-level singleton is.
+_SHARED = Evaluator()
+
+
 def evaluate(source: str, context: Mapping[str, Any] | None = None) -> Any:
     """Evaluate `source` against `context` with no functions available.
 
     A convenience for the common case of a comparison over data. Build an `Evaluator` when you
     want a registry or a shared instance.
+
+    Uses one module-level evaluator rather than building one per call, so a source evaluated twice
+    is compiled once. The evaluator it shares has no registry, so every caller of this function
+    sees the same language whoever else is using it.
 
     Args:
         source: The expression.
@@ -1004,4 +1128,4 @@ def evaluate(source: str, context: Mapping[str, Any] | None = None) -> Any:
     Raises:
         SafeExprError: For every failure.
     """
-    return Evaluator().evaluate(source, context)
+    return _SHARED.evaluate(source, context)

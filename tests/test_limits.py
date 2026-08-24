@@ -238,7 +238,17 @@ class TestTheScriptRuns:
         )
         assert finished.returncode == 0, finished.stderr
         data = json.loads(finished.stdout)
-        assert set(data) == {"python", "workloads", "observed_need", "blind_spots", "limits"}
+        # `compile_cache` joined this set when the compile cache landed. It is a measurement
+        # rather than a ratio: the bound is set by what the cache can hold rather than by what a
+        # rule needs, so it is published beside the caps instead of among them.
+        assert set(data) == {
+            "python",
+            "workloads",
+            "observed_need",
+            "blind_spots",
+            "compile_cache",
+            "limits",
+        }
         assert data["limits"]["DEFAULT_STEP_BUDGET"] == 6_000_000
 
 
