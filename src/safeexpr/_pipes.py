@@ -105,6 +105,43 @@ def shadowed_pipes(tree: ast.Expression, names: Container[str]) -> list[ast.BinO
     return found
 
 
+# A right-of-pipe name and where the author wrote it: `(name, lineno, col_offset)`.
+_Target = tuple[str, int, int]
+
+
+def pipe_targets(tree: ast.Expression, names: Container[str]) -> tuple[_Target, ...]:
+    """Every `|` in `tree` whose right-hand name is one of `names`, as names and positions.
+
+    **This is `shadowed_pipes` with the tree thrown away, and that is the whole point of it.** The
+    shadowed-pipe refusal is a decision about the *context*, so it has to be made per call; but
+    everything it needs from the *tree* depends only on the source and the registry, so it can be
+    computed once when the source is compiled and kept. What remains per call is the set
+    intersection that was always the cheap part.
+
+    Positions come from the right-hand name rather than from the `BinOp`, and the result is sorted
+    by them. `x | first | last` parses as `(x | first) | last` and both operators start at column
+    zero, so ordering on the operator is a tie broken by whichever the walk happened to reach
+    first. The colliding name is what differs between them, and it is what the caret should point
+    at. Sorting here rather than at the call site means the caller reports the first match in a
+    list that is already in source order.
+
+    Args:
+        tree: A parsed expression, **before** the rewrite. Afterwards `x | first` and `first(x)`
+            are the same tree and the distinction this depends on is gone.
+        names: The names to look for. The registry, at compile time: which of them actually
+            collides with the data is not known until a context arrives.
+
+    Returns:
+        `(name, lineno, col_offset)` for each offending pipe, in source order.
+    """
+    found: list[_Target] = []
+    for node in shadowed_pipes(tree, names):
+        right = node.right
+        name = right.id if isinstance(right, ast.Name) else right.func.id  # type: ignore[attr-defined]
+        found.append((name, right.lineno, right.col_offset))
+    return tuple(sorted(found, key=lambda target: (target[1], target[2])))
+
+
 def _slots(tree: ast.Expression) -> list[_Slot]:
     """Every node in `tree`, paired with where it sits in its parent.
 

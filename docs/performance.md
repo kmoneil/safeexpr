@@ -71,6 +71,43 @@ Most rules in most systems are this shape.
 **A rule that does touch one costs 4 to 5.4 steps per item**, and that rate is stable across three
 orders of magnitude. That is what makes a budget expressible in items rather than in nodes.
 
+### Steps are not the whole cost, and for a flat rule they used to be almost none of it
+
+A step is a node evaluated. Parsing, rewriting and validating the source is not counted, because it
+is not work the expression asked for, and for a flat rule it dwarfed everything else. Measured on
+one machine, medians of eleven rounds, in microseconds:
+
+| Case | Total | parse | shadow | transform | validate | eval | Fixed |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| feature flag | 33.1 | 6.9 | 8.5 | 7.1 | 13.1 | **2.7** | **91.7%** |
+| authorization | 28.8 | 5.1 | 7.6 | 7.1 | 12.2 | **2.5** | **91.4%** |
+| workflow condition | 25.8 | 4.9 | 6.8 | 6.2 | 10.7 | **2.3** | **91.2%** |
+| alerting rule, 1,000 rows | 1,061.0 | 6.0 | 7.7 | 8.9 | 11.0 | 1,031.2 | 2.8% |
+| pipeline, 1,000 rows | 1,641.1 | 15.7 | 16.8 | 20.5 | 24.8 | 1,568.1 | 4.4% |
+
+All of that fixed cost depends only on the source and the registry, and the registry is fixed when
+you build the evaluator, so **an evaluator now compiles each source once and keeps the result**:
+
+| Case | Cold | Warm | |
+| --- | --- | --- | --- |
+| feature flag | 40.6 us | 2.9 us | **14.0x** |
+| authorization | 38.4 us | 2.8 us | **13.7x** |
+| workflow condition | 34.0 us | 2.6 us | **13.3x** |
+| alerting rule, 1,000 rows | 1,193.3 us | 1,105.4 us | 1.08x |
+| pipeline, 1,000 rows | 1,704.9 us | 1,609.9 us | 1.06x |
+
+The collection rows are not a win and are not claimed as one: their fixed cost was already under
+5%, so there was nothing to remove. A cold call is now about 20% dearer than the old total, because
+it also builds and stores the entry, and it is paid once per distinct source per evaluator.
+
+**Two things follow for a host.** Build the evaluator once, at import time, and keep it: a fresh
+`Evaluator` per call throws the cache away and gets the cold column every time. And if you rotate
+through more than 128 distinct sources on one evaluator you will miss every time, which costs what
+this package cost before the cache existed and nothing worse.
+
+The module-level `evaluate()` shares one evaluator for exactly this reason, so the convenience
+function is warm too.
+
 ## Choosing a budget
 
 Start from the biggest collection a rule will see:
@@ -135,6 +172,7 @@ observed need or more**:
 | Result size | 1,048,576 elements | 100,000 | 10.5x | `EvaluationError` |
 | Step budget | 6,000,000 | 538,433 | 11.1x | `BudgetExceededError` |
 | Power result | 1 MiB of integer | set by measured time | | `EvaluationError` |
+| Compile cache | 128 entries per evaluator | set by its memory ceiling | | dropped and refilled |
 
 **Every limit refuses rather than degrades.** Nothing is truncated, nothing is silently
 approximated, and no limit is a warning. Each refusal names what was exceeded and by how much.
@@ -142,6 +180,20 @@ approximated, and no limit is a warning. Each refusal names what was exceeded an
 The source-length cap is the one not set by need: `ast.parse` gives out somewhere between 2,989
 and 5,975 levels of operator nesting depending on the interpreter, and does not fail gracefully
 when it does, so the cap is applied **before** CPython's parser ever sees the input.
+
+The compile cache is the other, and it is the only row that does not end in a refusal: past it the
+cache is dropped whole and refilled, so an expression still evaluates, it just pays for the compile
+again. The bound is set by what the cache can hold rather than by what a rule needs, measured with
+`tracemalloc` over 100 trees:
+
+| Source | Per entry | At the 128-entry bound |
+| --- | --- | --- |
+| a typical rule, 49 bytes | 4.1 KiB | 0.52 MiB |
+| a 2,046-byte flat literal, the widest the source cap admits | 262.6 KiB | 32.8 MiB |
+
+The second row is why it is bounded at all. A host that accepts expression text from an untrusted
+source would otherwise hold an unbounded allocation keyed by that text. `scripts/limits.py` prints
+both rows, and `tests/benchmarks/test_compile_cache_memory.py` carries a ceiling on each.
 
 Changing one of these means changing the package, which is the intended difficulty. They are
 readable if you need to check one:

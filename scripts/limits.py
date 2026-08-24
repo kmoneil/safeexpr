@@ -36,20 +36,22 @@ import ast
 import json
 import sys
 import time
+import tracemalloc
 from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from safeexpr import BudgetExceededError, Evaluator, standard_registry
-from safeexpr._eval import DEFAULT_STEP_BUDGET, MAX_POWER_RESULT_BITS
+from safeexpr._eval import DEFAULT_STEP_BUDGET, MAX_COMPILE_CACHE, MAX_POWER_RESULT_BITS
 from safeexpr._guards import (
     MAX_DATA_NESTING,
     MAX_RESULT_SIZE,
     SIZE_CHARGE_UNIT,
 )
 from safeexpr._parse import MAX_SOURCE_BYTES, parse
-from safeexpr._validate import MAX_EXPRESSION_DEPTH
+from safeexpr._pipes import pipe_targets, transform
+from safeexpr._validate import MAX_EXPRESSION_DEPTH, validate
 
 # DESIGN section 3's five, which are what the package promises to serve.
 CANONICAL: tuple[tuple[str, str], ...] = (
@@ -268,6 +270,56 @@ def blind_spots(items: int = 200_000) -> dict[str, float]:
     }
 
 
+def compile_one(source: str, registry: dict[str, Any]) -> tuple[Any, ...]:
+    """One cache entry, built the way `Evaluator.evaluate` builds it.
+
+    Spelled out here rather than reached through a private method, so the measurement is of the
+    thing the cache holds rather than of whatever an internal happens to be called this week.
+    """
+    tree = parse(source)
+    targets = pipe_targets(tree, registry)
+    return validate(transform(tree, registry), source), targets
+
+
+def compile_cache(trees: int = 100) -> dict[str, float]:
+    """What one evaluator's compile cache can hold, in bytes.
+
+    **The measurement that sets `MAX_COMPILE_CACHE`**, and the only limit in this file whose basis
+    is what it costs rather than what a rule needs. Compiling depends only on `(source, registry)`,
+    so an evaluator keeps the result; an unbounded dict keyed on caller-supplied text is a denial
+    of service, so the cache is bounded, and the bound is only reviewable next to the ceiling it
+    buys.
+
+    Two shapes, because they differ by a factor of forty: an ordinary rule, and the widest input
+    the source cap admits. A flat literal is the worst case per byte, since every element is a
+    node and none of them nests.
+
+    Args:
+        trees: How many to build before dividing. One tree is too small to measure.
+
+    Returns:
+        Bytes per tree for each shape, and the ceiling each implies at the bound.
+    """
+    typical = CANONICAL[0][1]
+    # The widest source the cap admits, built rather than typed so it tracks `MAX_SOURCE_BYTES`.
+    widest = "[0]"
+    while len(f"[{widest[1:-1]}, 0]".encode()) <= MAX_SOURCE_BYTES:
+        widest = f"[{widest[1:-1]}, 0]"
+    registry = standard_registry()
+    measured: dict[str, float] = {}
+    for label, source in (("typical", typical), ("widest", widest)):
+        compile_one(source, registry)  # warm every import this path touches
+        tracemalloc.start()
+        held = [compile_one(source, registry) for _ in range(trees)]
+        current, _ = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+        del held
+        measured[f"{label}_bytes"] = current / trees
+        measured[f"{label}_ceiling_bytes"] = current / trees * MAX_COMPILE_CACHE
+    measured["widest_source_bytes"] = float(len(widest.encode()))
+    return measured
+
+
 LIMITS: tuple[tuple[str, int, str], ...] = (
     ("MAX_SOURCE_BYTES", MAX_SOURCE_BYTES, "set by 3.11's parser cliff, not by observed need"),
     ("MAX_EXPRESSION_DEPTH", MAX_EXPRESSION_DEPTH, "expression_depth"),
@@ -276,6 +328,7 @@ LIMITS: tuple[tuple[str, int, str], ...] = (
     ("DEFAULT_STEP_BUDGET", DEFAULT_STEP_BUDGET, "steps"),
     ("SIZE_CHARGE_UNIT", SIZE_CHARGE_UNIT, "a rate rather than a cap; see the module"),
     ("MAX_POWER_RESULT_BITS", MAX_POWER_RESULT_BITS, "set by measured time, not by need"),
+    ("MAX_COMPILE_CACHE", MAX_COMPILE_CACHE, "set by its memory ceiling, not by need"),
 )
 
 
@@ -287,6 +340,7 @@ def report(quick: bool = False) -> dict[str, Any]:
         "workloads": {str(size): workload(size) for size in sizes},
         "observed_need": observed_need(),
         "blind_spots": blind_spots(20_000 if quick else 200_000),
+        "compile_cache": compile_cache(),
         "limits": {name: value for name, value, _ in LIMITS},
     }
 
@@ -309,6 +363,15 @@ def _print(data: dict[str, Any]) -> None:
             print(f"  {name:22} {value:>10,}  need {need[basis]:>9,}  {value / need[basis]:6.1f}x")
         else:
             print(f"  {name:22} {value:>10,}  {basis}")
+    cache = data["compile_cache"]
+    print(
+        f"\nCompile cache: {MAX_COMPILE_CACHE} entries per evaluator, and what that can hold\n"
+        f"  a typical rule       {cache['typical_bytes'] / 1024:8.1f} KiB/tree"
+        f"  ->{cache['typical_ceiling_bytes'] / 1024 / 1024:7.2f} MiB at the bound\n"
+        f"  a {int(cache['widest_source_bytes']):,}-byte literal"
+        f"  {cache['widest_bytes'] / 1024:8.1f} KiB/tree"
+        f"  ->{cache['widest_ceiling_bytes'] / 1024 / 1024:7.2f} MiB at the bound"
+    )
     print("\nTime per charged step: far above the reference means the budget cannot see the work")
     reference = data["blind_spots"]["map (reference)"]
     for label, nanoseconds in sorted(data["blind_spots"].items(), key=lambda kv: kv[1]):

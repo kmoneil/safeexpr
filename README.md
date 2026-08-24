@@ -263,9 +263,10 @@ expression can do to your process, and a knob for that is a knob an over-eager c
 ## Thread safety
 
 **One `Evaluator` is safe to share between threads, and that is a contract rather than an
-observation.** It is immutable after construction: the registry and the permitted attribute types
-are copied at construction rather than held, so a host that keeps the dict it passed in cannot
-change what an evaluator can do afterwards, and `__slots__` means nothing can be attached later.
+observation.** It is fixed after construction and **no evaluation can observe state left by
+another**: the registry and the permitted attribute types are copied at construction rather than
+held, so a host that keeps the dict it passed in cannot change what an evaluator can do
+afterwards, and `__slots__` means nothing can be attached later.
 
 Everything one evaluation needs lives in a call-scoped object: **the step counter and the `_`
 scope stack included**. The budget is therefore per call and not per evaluator, so two threads
@@ -277,12 +278,21 @@ Nothing here starts a thread, installs a signal handler or sets a timeout, so th
 interaction with whatever your host already does about any of those. That is a consequence of the
 budget being a counter rather than a clock.
 
-One thing is shared process-wide: **a bounded cache of compiled regular-expression patterns**.
-Compiling a pattern is a pure function of the pattern string, so a hit and a miss produce the same
-result, and `matches` is charged its declared cost either way, so the cache is invisible to the
-budget. The language has no clock, so nothing inside an expression can observe it at all.
-`tests/test_thread_safety.py` asserts each of these, including that a cold cache and a warm one
-cost exactly the same number of steps, and `python examples/threads.py` runs the lot.
+**Two things are cached, and both are memoisation caches**, which is the one kind of shared state
+that does not make this dishonest. An evaluator remembers the compiled form of each source it has
+seen, and a bounded cache of compiled regular-expression patterns is shared process-wide.
+
+Compiling is a pure function of the source and the registry, and the registry is fixed at
+construction, so a hit and a miss produce the same tree. The step budget is charged the same number
+of steps either way, and the language has no clock, so **nothing inside an expression can tell a
+warm cache from a cold one**. That is proved rather than argued: `tests/test_thread_safety.py` and
+`tests/test_compile_cache.py` bisect the smallest budget that evaluates, on a cold cache and again
+on a warm one, and compare the two numbers. `python examples/threads.py` runs the lot.
+
+The compiled-expression cache holds 128 entries per evaluator and is dropped whole when it fills.
+It is bounded rather than a plain dict because a host that accepts expression text from an
+untrusted source would otherwise hold an unbounded allocation keyed by that text; the bound and
+what it can cost are in [Performance](docs/performance.md#limits) beside every other limit.
 
 ## Non-goals
 
