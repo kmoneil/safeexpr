@@ -269,3 +269,106 @@ class TestOnlyOurErrorsEscape:
             check("lambda x: x")
         assert caught.value.__cause__ is None
         assert caught.value.__context__ is None
+
+
+def _expression_nodes() -> set[type[ast.expr]]:
+    """Every expression node type this interpreter has.
+
+    `ast.expr.__subclasses__()` rather than a scan of `vars(ast)`, which is the difference between
+    27 node types and 27 plus the deprecated `Num`/`Str`/`Bytes` aliases. Those subclass
+    `Constant`, not `expr`, and constructing one warns.
+    """
+    return set(ast.expr.__subclasses__())
+
+
+def _bare(node_type: type[ast.expr]) -> ast.expr:
+    """One instance of `node_type`, with every field filled so nothing deprecated is triggered.
+
+    Since 3.13, omitting a required field warns and says it becomes an error in 3.15, and this
+    project runs its suite with warnings as errors. The values are nonsense on purpose: the
+    allowlist decides on the node's *type* before anything looks at what is inside it, which is
+    the property being tested.
+    """
+    return node_type(**{field: ast.Constant(value=1) for field in node_type._fields})
+
+
+class TestTheAllowlistIsClosedOverEveryExpressionNode:
+    """F7, proven by construction rather than by two hand-written entries.
+
+    "New CPython syntax is new attack surface" is the lesson RestrictedPython's CVE-2025-22153
+    taught, and the corpus proves it for the one case that has actually happened: 3.14's t-strings
+    are expression nodes, so `t"{x}"` parses in `mode="eval"` and a denylist would have run it.
+
+    Two entries prove one case. This enumerates **every expression node type the running
+    interpreter has** and asserts each one is either on the allowlist deliberately or rejected,
+    so the property is re-proven on each interpreter in the matrix and fails on the day a future
+    Python adds a node nobody has reviewed. That is the whole claim behind a closed allowlist, and
+    it was the one part of it nothing checked.
+    """
+
+    # The expression nodes the language is made of. Written out rather than derived, because
+    # adding one is exactly the change that should be hard to make by accident: this list is the
+    # language surface, and a diff here is a diff to what an expression can be.
+    EXPECTED_ALLOWED = frozenset(
+        {
+            "Attribute", "BinOp", "BoolOp", "Call", "Compare", "Constant", "Dict", "IfExp",
+            "List", "Name", "Slice", "Subscript", "Tuple", "UnaryOp",
+        }
+    )  # fmt: skip
+
+    def test_the_interpreter_has_expression_nodes_to_check(self) -> None:
+        """A scan that found nothing would pass everything below."""
+        assert len(_expression_nodes()) >= 25
+
+    def test_the_allowed_expression_nodes_are_exactly_the_language(self) -> None:
+        allowed = {node.__name__ for node in _ALLOWED_NODES & _expression_nodes()}
+        assert allowed == set(self.EXPECTED_ALLOWED)
+
+    def test_every_other_expression_node_is_rejected(self) -> None:
+        """Including ones this test has never heard of.
+
+        On 3.14 that covers `TemplateStr` and `Interpolation` without either being named here,
+        which is the point: the allowlist closed them the day the interpreter shipped and this
+        says so without an edit.
+        """
+        for node_type in sorted(_expression_nodes() - _ALLOWED_NODES, key=lambda n: n.__name__):
+            tree = ast.Expression(body=_bare(node_type))
+            with pytest.raises(ValidationError):
+                validate(tree, "")
+
+    def test_the_rejection_names_the_construct_where_a_person_would_hit_it(self) -> None:
+        """A closed allowlist can reject a node it has never heard of, and the message then says
+        "`Whatever` nodes are not supported", which is honest and unhelpful. The constructs a
+        person actually types have a sentence written for them, and this is the list of the ones
+        that must."""
+        for name, expected in (
+            ("Lambda", "lambda"),
+            ("ListComp", "list comprehension"),
+            ("GeneratorExp", "generator expression"),
+            ("JoinedStr", "f-string"),
+            ("FormattedValue", "f-string"),
+            ("NamedExpr", "walrus"),
+            ("Starred", "star unpacking"),
+            ("Await", "await"),
+            ("Set", "set literal"),
+        ):
+            node_type = getattr(ast, name, None)
+            assert node_type is not None, f"ast has no {name}"
+            with pytest.raises(ValidationError, match=expected):
+                validate(ast.Expression(body=_bare(node_type)), "")
+
+    def test_no_interpolation_node_is_allowed_whatever_it_is_called(self) -> None:
+        """The no-interpolation decision, read off the allowlist rather than a corpus entry.
+
+        `JoinedStr` and `FormattedValue` exist everywhere; `TemplateStr` and `Interpolation` only
+        from 3.14. Checking by name means the assertion is the same sentence on every interpreter
+        and simply covers more on the newer ones.
+        """
+        present = [
+            getattr(ast, name)
+            for name in ("JoinedStr", "FormattedValue", "TemplateStr", "Interpolation")
+            if hasattr(ast, name)
+        ]
+        assert len(present) >= 2, "sanity: f-string nodes exist on every supported version"
+        for node_type in present:
+            assert node_type not in _ALLOWED_NODES
