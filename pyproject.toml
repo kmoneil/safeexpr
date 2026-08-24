@@ -124,6 +124,12 @@ include = [
   "/tests",
   "/corpus",
   "/scripts",
+  # `docs/` and `examples/` ship for the same reason `tests/` does: they are checked rather than
+  # written. `tests/test_docs.py` evaluates every expression example and runs every code block in
+  # `docs/`, and `tests/test_examples.py` runs every program in `examples/` as a subprocess, so a
+  # distribution carrying the suite without them would carry tests that cannot run.
+  "/docs",
+  "/examples",
   "/README.md",
   "/CHANGELOG.md",
   "/THREAT-MODEL.md",
@@ -253,6 +259,12 @@ ban-relative-imports = "parents"
 "src/safeexpr/_urls.py" = ["ANN401"]
 "src/safeexpr/_regex.py" = ["ANN401"]
 "tests/**" = ["D", "ANN", "S101", "S603", "S607", "S311", "PLR2004", "T20"]
+# Examples are programs a reader runs and reads, so they invert two rules the package holds to.
+# `T20`, because printing is what an example *does*: the narrated output is the documentation.
+# `ANN`, because a signature carrying full annotations on a four-line demonstration is noise in
+# the thing being demonstrated. They are NOT exempt from correctness lints, and every one of them
+# is executed by `tests/test_examples.py`.
+"examples/**" = ["T20", "ANN", "D101", "D102", "D103", "PLR2004", "S101"]
 
 # ---------------------------------------------------------------------------
 # mypy, scoped to shipped code

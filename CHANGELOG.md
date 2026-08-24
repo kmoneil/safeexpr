@@ -254,6 +254,42 @@ in; the remaining function tiers and the evaluation budget are not.
   generators and `_frame` methods could not be verified against OSV, so it is not cited and F6
   rests on RestrictedPython's CVE-2023-37271 alone.
 
+- **`docs/`, eight task-shaped guides**, indexed by `docs/README.md`: getting started, the
+  language, a reference for every shipped function, pipes and `_`, nine worked recipes, embedding
+  the package in a host, the error taxonomy, and performance and limits.
+
+  **They are executed rather than read.** `tests/test_docs.py` evaluates every
+  `expression => result` line in the reference documents against the standard registry and
+  compares the `repr`, runs every Python block in every document and compares its output to the
+  one the document claims, and resolves every link and cross-document anchor. It also holds the
+  documents to the code: the function reference must carry a section for every registry entry and
+  none for anything else, the reserved-name list must be exactly what is reserved, and the
+  embedding guide's configuration table must name exactly the constructor's parameters. Writing
+  the guides found four claims that were wrong, including a regex note saying a `{m,n}` bound
+  clears the backtracking gate when only an exact `{m}` does.
+
+- **`examples/`, eighteen runnable programs**, one per topic, each taking no arguments, needing
+  no network and printing its own narrated output. `tests/test_examples.py` runs every one of
+  them as a subprocess, exactly as a reader would, and pins the **claim** each one exists to make
+  rather than only its exit status: that `attributes.py` shows a property running host code three
+  times from inside an expression, that `threads.py` shows three threads refusing on budget while
+  three answer from the same evaluator, that `rules_from_config.py` catches a quadratic rule at
+  load time with a correctly sized sample. Both directions of the index are resolved against the
+  directory, so an example with no row and a row with no example both fail.
+
+- **A front page written to be read by somebody deciding whether to use this**: a banner, badges,
+  a "what you get" table, a jump-to bar, a quick start, and a documentation table, with the
+  reference material it used to open with moved into `docs/` and linked. Every claim the old
+  README made is still there and still checked by `tests/test_readme.py`, which gains checks that
+  the banner exists, that every guide is linked, and that every example command on the page names
+  a file that is there.
+
+- `docs/` and `examples/` ship in the source distribution, because `tests/` does. Both new test
+  modules read those directories, so an sdist carrying the suite without them would carry tests
+  that fail on a downstream packager's machine for a reason that has nothing to do with their
+  build. `tests/test_packaging.py` asserts the include list names them, and its private-reference
+  scan now covers them too.
+
 ### Fixed
 - **The shipped test suite did not pass from the shipped source distribution.**
   `tests/test_lanes.py` reads `.github/workflows/ci.yml` to assert every lane is wired into CI,

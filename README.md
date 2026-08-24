@@ -1,13 +1,47 @@
-# safeexpr
+<p align="center">
+  <img src="docs/assets/safeexpr.svg" alt="safeexpr" width="620">
+</p>
 
-CEL-class expression evaluation for Python at simpleeval's dependency cost: **zero runtime
-dependencies**, pure stdlib, no compiled wheels.
+<p align="center">
+  <b>CEL-class expression evaluation for Python, at simpleeval's dependency cost.</b>
+</p>
+
+<p align="center">
+  <a href="https://github.com/kmoneil/safeexpr/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/kmoneil/safeexpr/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="LICENSE"><img alt="Licence" src="https://img.shields.io/badge/licence-Apache--2.0-blue"></a>
+  <a href="#requirements"><img alt="Python" src="https://img.shields.io/badge/python-3.11%20%E2%80%93%203.14-blue"></a>
+  <a href="#install"><img alt="Runtime dependencies" src="https://img.shields.io/badge/runtime%20dependencies-0-brightgreen"></a>
+  <a href="#install"><img alt="Wheel" src="https://img.shields.io/badge/wheel-py3--none--any-brightgreen"></a>
+  <a href="THREAT-MODEL.md"><img alt="Threat model" src="https://img.shields.io/badge/threat%20model-published-8957e5"></a>
+</p>
 
 ```
 user.plan == "pro" and user.region in ["us", "eu"]
 metrics | where(_.value > threshold) | first
-orders | where(_.status == "paid") | group_by(_.customer_id)
+orders | where(_.status == "paid") | group_by(_.customer)
 ```
+
+Rules your config authors can write, evaluated in your process, with **zero runtime
+dependencies**: pure stdlib, one `py3-none-any` wheel, nothing compiled and nothing transitive.
+The language is a strict subset of Python's own expression grammar, so there is no new syntax to
+learn and no parser generator to ship.
+
+### What you get
+
+|  |  |
+| --- | --- |
+| **Zero dependencies, and it is the product** | One pure-Python wheel. Asserted three ways: the metadata is read by a test, a built wheel is imported in an interpreter with nothing else in it, and a CI lane runs the second |
+| **Dot access, pipes, and forty-one functions** | `user.plan`, `orders \| where(...) \| group_by(...)`, collections, types, strings, regex, dates and URLs. All opt-in |
+| **No lambda, and none needed** | `where(_.price > 10)` hands the function the comparison itself, unevaluated, and runs it once per item |
+| **Every failure is one exception type** | `SafeExprError`, carrying the source and a position. Nothing else escapes, not even from CPython's parser |
+| **A bound you can review** | One step counter per call. Not a timer, so no signal, no thread, and the same answer on every platform and in any thread |
+| **A published threat model** | Nine classes of known sandbox escape, each with its advisories and the corpus entry proving it is unreachable here |
+
+**Jump to:** [Install](#install) &nbsp;·&nbsp; [Quick start](#quick-start) &nbsp;·&nbsp;
+[Documentation](#documentation) &nbsp;·&nbsp; [Reserved names](#reserved-names) &nbsp;·&nbsp;
+[Limits](#limits) &nbsp;·&nbsp; [Thread safety](#thread-safety) &nbsp;·&nbsp;
+[Non-goals](#non-goals) &nbsp;·&nbsp; [Alternatives](#alternatives) &nbsp;·&nbsp;
+[Threat model](#threat-model)
 
 ## Install
 
@@ -22,9 +56,13 @@ last part is the product rather than a detail, so it is asserted three ways rath
 `tests/test_zero_deps.py` reads the built metadata, `scripts/check_zero_deps.py` imports a built
 wheel in an interpreter that has nothing else in it, and the `zero-deps` CI lane runs the second.
 
-## Status
+Until then, from the source:
 
-**Alpha.** The evaluator works for comparison, arithmetic, field access and indexing:
+```console
+pip install git+https://github.com/kmoneil/safeexpr
+```
+
+## Quick start
 
 ```python
 from safeexpr import evaluate
@@ -35,23 +73,75 @@ evaluate(
 # True
 ```
 
-Pipes and the collections tier work, and are opt-in:
+Dots read dictionary keys, so `user.plan` and `user["plan"]` are the same lookup and a config
+author writes the first without being taught. Nothing else about the value is reachable.
+
+Functions and pipes are one argument away:
 
 ```python
 from safeexpr import Evaluator, standard_registry
 
 rules = Evaluator(registry=standard_registry())
 rules.evaluate(
-    'orders | where(_.status == "paid") | group_by(_.customer_id)'
+    'orders | where(_.status == "paid") | group_by(_.customer)'
     ' | map(merge(_, {"n": len(_.items)}))',
-    {"orders": [{"customer_id": "c1", "status": "paid", "items": [1, 2]}]},
+    {"orders": [{"customer": "c1", "status": "paid", "items": [1, 2]}]},
 )
-# [{'key': 'c1', 'items': [{'customer_id': 'c1', 'status': 'paid', 'items': [1, 2]}], 'n': 1}]
+# [{'key': 'c1', 'items': [{'customer': 'c1', 'status': 'paid', 'items': [1, 2]}], 'n': 1}]
 ```
 
 `Evaluator()` starts with no functions, and adding them is one argument rather than a default,
 because a registered name is reserved on the right of a `|`: with `first` registered,
-`flags | first` calls it whatever the context says `first` is.
+`flags | first` calls it whatever the context says `first` is. See
+[Reserved names](#reserved-names).
+
+Build the evaluator once, at import time, and evaluate per record. It is immutable and safe to
+share between threads.
+
+## Documentation
+
+| Guide | What is in it |
+| --- | --- |
+| [Getting started](docs/getting-started.md) | Install, a first expression, the context, and pipes in thirty seconds |
+| [The language](docs/language.md) | Every piece of syntax, and what is deliberately absent |
+| [Function reference](docs/functions.md) | All forty-one functions plus `bitor`, each with a worked example and its refusals |
+| [Pipes and `_`](docs/pipes.md) | What `\|` rewrites to, the item variable, nesting, and the one name collision |
+| [Recipes](docs/recipes.md) | Feature flags, alert rules, access control, validation, routing, pricing, rollups, URL allowlists, config files |
+| [Embedding safeexpr](docs/embedding.md) | Validating rules at load time, adding your own functions, attribute access, threads, untrusted input |
+| [Errors](docs/errors.md) | The seven error classes, who has to fix each, and how to show one to a rule author |
+| [Performance and limits](docs/performance.md) | The step budget, what a rule costs, and choosing one |
+
+**And [`examples/`](examples/README.md) is documentation that executes.** Eighteen programs, each
+running with no arguments and printing its own narrated output, every one of them run by the test
+suite:
+
+```console
+python examples/quickstart.py          # one import, one call, and what it refuses
+python examples/pipelines.py           # `|`, `_`, and the nine functions that take an expression
+python examples/feature_flags.py       # a predicate per flag, changed without a deploy
+python examples/what_is_refused.py     # thirty-four escape attempts, run rather than described
+```
+
+## Status
+
+**Alpha.** The evaluator, the collections tier and pipes all work; the `CHANGELOG.md` "Known
+limitations" section is kept current with exactly what does and does not exist. The
+`Development Status :: 3 - Alpha` classifier stays until the escape corpus ships and passes on
+every supported interpreter, because that corpus is the security claim.
+
+Forty-one functions across six tiers: collections, types, strings, regex, dates and URL. Three
+things worth knowing before you reach for them: `str` converts primitives and refuses arbitrary
+objects, because converting one would run that object's own code to produce the text; `slugify`
+is ASCII in core, so a script with no ASCII form is dropped rather than transliterated; and
+`matches` refuses patterns that can backtrack catastrophically.
+
+That last one is a real restriction, so it is worth stating plainly. `^(a+)+$` against a
+29-character input takes seven seconds, so no input-length cap helps and the pattern itself is
+refused before it compiles. A pattern is refused if it nests one backtrackable repeat inside
+another, or repeats an alternation whose branches match the same text. **Atomic groups and
+possessive quantifiers reset that**, so `^(?>a+)+$` and `^(a++)+$` are accepted where `^(a+)+$`
+is not; both are available on every supported version, which is 3.11 and later. The gate is
+deliberately conservative and refuses a few patterns that happen to be fast.
 
 ### Reserved names
 
@@ -82,6 +172,11 @@ slugify sort_by split starts_with str strip sum take unique_by upper url_host ur
 where
 ```
 
+[Pipes and `_`](docs/pipes.md) has the longer version, including the three ways out of a
+collision, and `python examples/reserved_names.py` runs all of them.
+
+## Limits
+
 Every evaluation runs under a **step budget**: one counter, decremented per node evaluated,
 shared across nested evaluation, raising `BudgetExceededError` rather than running on. It is a
 counter and not a timer, so it needs no `signal`, no thread and no executor, gives the same
@@ -93,28 +188,6 @@ size. That closes the gap where `rows | map(t + t)` allocated hundreds of megaby
 seventeen-character expression while costing almost nothing to evaluate. Anything under 64
 elements is charged nothing, so ordinary rules are unaffected, and lowering the budget tightens
 the time bound and the memory bound together.
-
-Forty-one functions across six tiers: collections, types, strings, regex, dates and URL. Three
-things worth knowing before you reach for them: `str` converts primitives and refuses arbitrary
-objects, because converting one would run that object's own code to produce the text; `slugify`
-is ASCII in core, so a script with no ASCII form is dropped rather than transliterated; and
-`matches` refuses patterns that can backtrack catastrophically.
-
-That last one is a real restriction, so it is worth stating plainly. `^(a+)+$` against a
-29-character input takes seven seconds, so no input-length cap helps and the pattern itself is
-refused before it compiles. A pattern is refused if it nests one backtrackable repeat inside
-another, or repeats an alternation whose branches match the same text. **Atomic groups and
-possessive quantifiers reset that**, so `^(?>a+)+$` and `^(a++)+$` are accepted where `^(a+)+$`
-is not; both are available on every supported version, which is 3.11 and later. The gate is
-deliberately conservative and refuses a few patterns that happen to be fast.
-
-The `CHANGELOG.md` "Known limitations" section is kept current with exactly what does and does
-not exist.
-
-The `Development Status :: 3 - Alpha` classifier stays until the escape corpus ships and passes
-on every supported interpreter, because that corpus is the security claim.
-
-## Limits
 
 Every limit is set from a measurement at **ten times observed need or more**, and
 `python scripts/limits.py` reproduces the table on your own machine. `tests/test_limits.py`
@@ -152,6 +225,13 @@ every platform and in every thread, and it arrives before the work does rather t
 If a hundred thousand items is not your scale, say how much more you need. There is deliberately
 no value meaning "unlimited": a bound you cannot express is a bound you cannot review.
 
+**Reference timing.** The five canonical use cases at 100,000 items: the heaviest is the pipeline
+at 538,433 steps in 153 ms, and the rate is **4.0 to 5.4 steps per item**, stable across 10³, 10⁴
+and 10⁵. That rate is what makes a budget expressible in items rather than in nodes: at the
+originally proposed 100,000 steps it would have covered about twenty thousand items and raised on
+a hundred thousand. [Performance and limits](docs/performance.md) has the table for choosing a
+budget, and `python examples/budget.py` measures what your own rule costs.
+
 ### Changing them
 
 Three are constructor arguments on `Evaluator`, and those three are the whole configuration
@@ -171,19 +251,14 @@ rules = Evaluator(registry=standard_registry(), budget=60_000_000)
 registering a type opts that type back into attribute traversal, which is where essentially every
 published Python sandbox escape has started. It is limited to the attribute names you list, and
 what you list is yours to defend. Everything else in this package is closed by default; this is
-the door, and it only opens from your side.
+the door, and it only opens from your side. `python examples/attributes.py` shows a property
+running your code three times from inside an expression, which is what that sentence means.
 
 Every other limit is a module constant rather than configuration. Source length is set by CPython
 3.11's parser rather than by preference, and the rest are set from measurement at ten times
 observed need. They are readable (`safeexpr._validate.MAX_EXPRESSION_DEPTH` and friends) and
 changing one means changing the package, which is the intended difficulty: they bound what an
 expression can do to your process, and a knob for that is a knob an over-eager caller turns.
-
-**Reference timing.** The five canonical use cases at 100,000 items: the heaviest is the pipeline
-at 538,433 steps in 153 ms, and the rate is **4.0 to 5.4 steps per item**, stable across 10³, 10⁴
-and 10⁵. That rate is what makes a budget expressible in items rather than in nodes: at the
-originally proposed 100,000 steps it would have covered about twenty thousand items and raised on
-a hundred thousand.
 
 ## Thread safety
 
@@ -207,7 +282,7 @@ Compiling a pattern is a pure function of the pattern string, so a hit and a mis
 result, and `matches` is charged its declared cost either way, so the cache is invisible to the
 budget. The language has no clock, so nothing inside an expression can observe it at all.
 `tests/test_thread_safety.py` asserts each of these, including that a cold cache and a warm one
-cost exactly the same number of steps.
+cost exactly the same number of steps, and `python examples/threads.py` runs the lot.
 
 ## Non-goals
 
@@ -223,6 +298,9 @@ These are not "not yet". They are the shape of the package, and each one is load
   query language for an external store, and there is no plan for it to become one. The
   audit-hook tripwire under `How this is tested` exists to keep this true by observation rather
   than by intention.
+- **No clock, and no randomness.** An expression is a pure function of its context, so the same
+  rule against the same data gives the same answer forever, in a test, in a replay and in
+  production. A rule about "recent" takes the time from the host, as a value.
 - **Not CEL, and not CEL-compatible.** The semantics are close enough to be useful and are not a
   promise. Anyone who needs CEL semantics should pay CEL's dependency cost rather than ask this
   package to grow into them.
@@ -273,7 +351,7 @@ dependency-free, so the Go slot is filled. This package is Python only.
 
 ## How this is tested
 
-Beyond the escape corpus, three things run on every supported interpreter:
+Beyond the escape corpus, four things run on every supported interpreter:
 
 - **Differential testing against CPython.** Generated expressions inside the safe subset must
   give the answer `eval` gives, or both must refuse. Coverage of the node allowlist is asserted,
@@ -284,6 +362,10 @@ Beyond the escape corpus, three things run on every supported interpreter:
   events are all observed process-wide, so an escape trips it whether or not anybody wrote a test
   for that escape.
 - **A published limits measurement.** `python scripts/limits.py` reproduces the table above.
+- **The documentation, executed.** Every expression example in `docs/` is evaluated and compared
+  to its printed result, every code block is run and compared to the output it claims, and every
+  program in `examples/` is run as a subprocess with its central claim pinned. An example that has
+  drifted out of step with the library fails a build rather than misleading a reader.
 
 > **Audit hooks are a test tripwire here, not a defence layer, and nothing installs one at
 > runtime.** They observe rather than block; they fire process-wide, so a host would pay for
@@ -301,7 +383,9 @@ Beyond the escape corpus, three things run on every supported interpreter:
 `THREAT-MODEL.md` is the catalog behind that statement: nine classes of published sandbox escape,
 one section each, with the mechanism, the advisories where it has broken a real project, and the
 corpus entries proving it is unreachable here. Every entry id in it is also a pytest node id, so
-any single claim runs with `pytest tests/test_corpus.py -k <id>`.
+any single claim runs with `pytest tests/test_corpus.py -k <id>`. To watch the refusals happen
+instead, `python examples/what_is_refused.py` runs thirty-four attempts and prints what each one
+gets back.
 
 One disclosure is deliberate and worth knowing about: **an error names the type of a value it
 could not work with**, so "cannot compare `Order` with `int`" tells an expression author a class
