@@ -41,7 +41,13 @@ from ._errors import (
     SafeExprError,
     contained,
 )
-from ._guards import HASHABLE_CONTAINERS, MAX_RESULT_SIZE, check_depth
+from ._guards import (
+    HASHABLE_CONTAINERS,
+    MAX_RESULT_SIZE,
+    check_depth,
+    concatenated_size,
+    size_charge,
+)
 from ._parse import parse
 from ._pipes import shadowed_pipes, transform
 from ._registry import Function, FunctionError, as_function, describe_type
@@ -233,6 +239,27 @@ def _checked_budget(budget: object) -> int:
         message = f"budget must be a positive integer, got {budget!r}"
         raise ValueError(message)
     return budget
+
+
+def _spend(run: _Run, node: ast.AST, amount: int) -> None:
+    """Take `amount` from the budget, or say it has run out.
+
+    Args:
+        run: The evaluation state.
+        node: The node to point the error at.
+        amount: How many steps to spend.
+
+    Raises:
+        BudgetExceededError: If the budget is exhausted.
+    """
+    run.steps -= amount
+    if run.steps < 0:
+        raise BudgetExceededError(
+            run.budget,
+            source=run.source,
+            lineno=getattr(node, "lineno", None),
+            offset=(node.col_offset + 1 if hasattr(node, "col_offset") else None),
+        )
 
 
 def _repetition_size(left: Any, right: Any) -> int | None:
@@ -430,12 +457,7 @@ class Evaluator:
         # the most security-critical line in the package is worth more than 15%.
         run.steps -= 1
         if run.steps < 0:
-            raise BudgetExceededError(
-                run.budget,
-                source=run.source,
-                lineno=getattr(node, "lineno", None),
-                offset=(node.col_offset + 1 if hasattr(node, "col_offset") else None),
-            )
+            _spend(run, node, 0)
         handler = self._DISPATCH.get(type(node))
         if handler is None:
             # Unreachable: validation runs first and rejects anything not in the allowlist. Kept
@@ -641,19 +663,12 @@ class Evaluator:
         # Guarded on the predicted length rather than on the operands, for the same reason `**`
         # is guarded on the width of its result: an error after the allocation has already cost
         # the allocation.
-        if isinstance(node.op, ast.Mult):
-            size = _repetition_size(left, right)
-            if size is not None and size > MAX_RESULT_SIZE:
-                raise _error(
-                    run,
-                    node,
-                    f"`*` would produce {size:,} items, over the limit of {MAX_RESULT_SIZE:,}",
-                )
+        self._check_produced_size(node, left, right, run)
 
         op = _BINOPS[type(node.op)]
         symbol = _OP_SYMBOLS.get(type(node.op), "?")
         try:
-            return op(left, right)
+            produced = op(left, right)
         except ZeroDivisionError:
             failure = _error(run, node, "division by zero")
         except TypeError:
@@ -674,7 +689,45 @@ class Evaluator:
                 f"cannot apply `{symbol}`: the operation recursed without end, which happens "
                 f"when values nest too deeply or refer to themselves",
             )
+        else:
+            # **Producing a large value costs budget.** The per-result cap above bounds any one
+            # allocation; this is what bounds the total, and the total is what actually hurts:
+            # every string in `rows | map(t + t)` is well under the cap and the sum was 343 MB.
+            charge = size_charge(produced)
+            if charge:
+                _spend(run, node, charge)
+            return produced
         raise failure
+
+    def _check_produced_size(self, node: ast.BinOp, left: Any, right: Any, run: _Run) -> None:
+        """Refuse a repetition or concatenation whose result would be too large.
+
+        **Both are guarded on the predicted size**, for the same reason `**` is: an error raised
+        after the allocation has already cost the allocation. `*` was measured allocating five
+        megabytes from fifteen characters, and `+` doubles, so `a + a + a + a` on a
+        200,000-item list is 800,000 items from four nodes.
+
+        Args:
+            node: The operation.
+            left: The left operand.
+            right: The right operand.
+            run: The evaluation state.
+
+        Raises:
+            EvaluationError: If the result would be over the cap.
+        """
+        if isinstance(node.op, ast.Mult):
+            symbol, size = "*", _repetition_size(left, right)
+        elif isinstance(node.op, ast.Add):
+            symbol, size = "+", concatenated_size(left, right)
+        else:
+            return
+        if size is not None and size > MAX_RESULT_SIZE:
+            raise _error(
+                run,
+                node,
+                f"`{symbol}` would produce {size:,} items, over the limit of {MAX_RESULT_SIZE:,}",
+            )
 
     def _power(self, node: ast.BinOp, base: Any, exponent: Any, run: _Run) -> Any:
         """`**`, guarded on the size of the result rather than on the exponent."""
@@ -799,14 +852,7 @@ class Evaluator:
         # What the function costs beyond the nodes its arguments spend. A per-call figure: work
         # that scales with a collection is already charged per item, because a lazy argument is
         # re-evaluated through `_eval` once per item and each of those pays for itself.
-        run.steps -= function.cost
-        if run.steps < 0:
-            raise BudgetExceededError(
-                run.budget,
-                source=run.source,
-                lineno=node.lineno,
-                offset=node.col_offset + 1,
-            )
+        _spend(run, node, function.cost)
         # **Arity before arguments.** Checked here, not by letting the call raise `TypeError`,
         # because those two failures are indistinguishable once they arrive: a function handed
         # the wrong *number* of arguments and a function handed the wrong *kind* both raise
@@ -828,7 +874,7 @@ class Evaluator:
             for index, argument in enumerate(node.args)
         ]
         try:
-            return function.call(*arguments)
+            produced = function.call(*arguments)
         except SafeExprError:
             raise
         except FunctionError as objection:
@@ -856,6 +902,14 @@ class Evaluator:
             # A registry function objecting to its input. The exception type is not reported:
             # these are our own functions and the useful part is which call failed.
             failure = _error(run, node, f"`{name}` could not process its arguments")
+        else:
+            # The other half of the size charge. `where`, `map`, `split`, `join`, `extend` and
+            # `merge` all build a value whose size the caller chose, and the declared per-call
+            # cost cannot see that.
+            charge = size_charge(produced)
+            if charge:
+                _spend(run, node, charge)
+            return produced
         raise failure
 
     # Node type to handler, built inside the class body so the handlers are plain names here

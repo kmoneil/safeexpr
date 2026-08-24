@@ -120,6 +120,28 @@ in; the remaining function tiers and the evaluation budget are not.
   declared and not yet charged.
 - `FunctionError`, for a registry function to say what is wrong with the values it was given. It
   carries a message and nothing else, and the evaluator adds the position.
+- **Producing a large value costs budget**, which is what bounds memory. The step budget counts
+  nodes evaluated, and a node that allocates is one node however much it allocates: measured,
+  `rows | map(t + t)` over four thousand rows of 100,000 characters is a seventeen-character
+  expression that allocated 343 MB and nothing saw it. No per-result cap could, because every one
+  of those strings is comfortably under the cap and only the total hurt.
+  - One step per 64 elements produced. **Integer division is the point**: anything under 64
+    elements costs nothing, so an ordinary rule building short strings and small lists pays
+    exactly what it paid before, and only bulk allocation is charged.
+  - **One knob bounds both time and memory.** A host wanting a tighter memory bound lowers the
+    budget, and the two scale together. At the default, total production is bounded at roughly
+    384 million elements.
+  - The charge is on what an operation *produces*, not on what it walks. `sum` over ten million
+    integers still costs what `sum` over ten costs: it returns one integer, allocates nothing
+    proportional to its input and holds nothing. Charging a scan as though it were an allocation
+    would make a legitimate aggregate expensive for no reason.
+  - Legitimate work is unaffected: all six canonical shapes at 100,000 items run in under a fifth
+    of a second at the default budget.
+- **`+` had no size cap, though `*` did**, so the same amplification was one character away.
+  `a + a + a + a` on a 200,000-item list is 800,000 items from four nodes. Concatenation is now
+  capped on its predicted size, and `extend` and `merge` are capped on theirs; `merge` is checked
+  as it grows, because overlapping keys mean the sum of the inputs is an upper bound rather than
+  an answer.
 - **Guards on the host's data: how deeply it may nest, and what happens when it refers to
   itself.** F4. Nothing here recurses over data; comparing and hashing it recurses in C on our
   behalf, and the two fail differently.
@@ -245,14 +267,9 @@ in; the remaining function tiers and the evaluation budget are not.
 - **Reading a field off a parsed timestamp needs the host to opt in.** `parse_iso` returns a
   `datetime`, which compares and formats; `.year` needs `attribute_types`, because attribute
   access reaching arbitrary objects is the thing this package most deliberately does not do.
-- **The budget bounds evaluation, not every kind of work.** A registry function that loops in C
-  rather than re-evaluating an expression is charged its declared cost once, however many items
-  it walks, so `sum` over ten million integers costs the same as `sum` over ten. That matters
-  much less than it sounds, because the unbounded shape is the nested lazy and that is charged
-  per item; a single pass over ten million integers is a fraction of a second. Folding result
-  size into the charge is the memory-amplification policy's business.
-- **No memory bound.** `extend` and `merge` on large inputs allocate proportionally to them and
-  nothing caps the total.
+- **The budget's element is not a byte.** Producing a value costs one step per 64 elements, and
+  an element is a character for text and an item for a collection, so a list of pointers costs
+  more memory per element than a string does. The bound is real and the units are approximate.
 - **`merge` is shallow.** Nested mappings are replaced rather than combined. A deep merge needs a
   depth guard and cycle detection over host data, which is not built.
 - **Data functions are guarded where Python raises, not where it crashes.** Sorting, comparing

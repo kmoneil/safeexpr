@@ -49,7 +49,7 @@ import operator
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
-from ._guards import HASHABLE_CONTAINERS, check_depth
+from ._guards import HASHABLE_CONTAINERS, check_depth, within_size
 from ._guards import sequence as _sequence
 from ._registry import Function, FunctionError, describe_type
 
@@ -118,8 +118,13 @@ def _extend(items: Any, other: Any) -> list[Any]:
 
     The sequence counterpart to `merge`: `merge` combines two mappings, this combines two lists,
     and neither modifies what it was given.
+
+    Capped on the predicted size, because concatenation is how a rule turns two collections into
+    one twice as large and chaining does it again.
     """
-    return [*_sequence(items), *_sequence(other)]
+    first, second = _sequence(items), _sequence(other)
+    within_size(len(first) + len(second), "a list")
+    return [*first, *second]
 
 
 def _group_by(items: Any, key: LazyExpr) -> list[dict[str, Any]]:
@@ -283,6 +288,9 @@ def _merge(*mappings: Any) -> dict[Any, Any]:
         if not isinstance(mapping, Mapping):
             raise FunctionError(f"needs mappings, got `{describe_type(mapping)}`")
         merged.update(mapping)
+        # Checked as it grows rather than predicted, because overlapping keys mean the sum of the
+        # inputs is an upper bound and not an answer. The cost is one comparison per mapping.
+        within_size(len(merged), "a mapping")
     return merged
 
 

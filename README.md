@@ -75,6 +75,12 @@ counter and not a timer, so it needs no `signal`, no thread and no executor, giv
 answer on every platform and inside any thread, and bounds a filter over a context of any size.
 Set it with `Evaluator(budget=...)`; the default is six million steps.
 
+The budget also bounds **memory**, because producing a value costs steps in proportion to its
+size. That closes the gap where `rows | map(t + t)` allocated hundreds of megabytes from a
+seventeen-character expression while costing almost nothing to evaluate. Anything under 64
+elements is charged nothing, so ordinary rules are unaffected, and lowering the budget tightens
+the time bound and the memory bound together.
+
 Forty-one functions across six tiers: collections, types, strings, regex, dates and URL. Three
 things worth knowing before you reach for them: `str` converts primitives and refuses arbitrary
 objects, because converting one would run that object's own code to produce the text; `slugify`

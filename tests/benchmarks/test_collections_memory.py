@@ -8,14 +8,25 @@ copying every item shows up as a failure rather than as a slow leak in somebody'
 Ceilings, not targets, and set from measurement rather than from a round number. Against the
 ten-thousand-row list below, the high watermark today is:
 
-    where      40.8 KiB     the kept rows, by reference
-    map        83.1 KiB     one list of results
-    group_by   81.2 KiB     twenty group records over the same row objects
-    sort_by     1.2 MiB     ten thousand (key, item) pairs, discarded on the way out
+    where       40.8 KiB    the kept rows, by reference
+    map         83.1 KiB    one list of results
+    group_by    81.2 KiB    twenty group records over the same row objects
+    extend     312.5 KiB    one list of references over twenty thousand rows
+    sort_by      1.2 MiB    ten thousand (key, item) pairs, discarded on the way out
+    merge        3.9 MiB    forty thousand entries in a new mapping
+    aggregate   38.3 MiB    two hundred rows of 200,000 characters: the shape that
+                            allocated 343 MB before size cost budget
 
-Each ceiling is roughly three times its measurement: loose enough that ordinary variation and a
-different interpreter do not fail the suite, tight enough that copying the rows instead of
-referencing them, which for this data is about 2 MiB, breaks through every one of them.
+The last row is the one the memory-amplification policy exists for. `rows | map(t + t)` is a
+seventeen-character expression, and at four thousand rows it allocated 343 MB with nothing to
+stop it: every string in it is far under the per-result cap, so only the total ever hurt. The
+budget now charges one step per 64 elements produced, which bounds the total and leaves ordinary
+values free, since anything under 64 elements charges nothing at all.
+
+Each ceiling is roughly two to three times its measurement: loose enough that ordinary
+variation and a different interpreter do not fail the suite, tight enough that copying the
+rows instead of referencing them, which for this data is about 2 MiB, breaks through every
+one of them.
 
 **Only enforced under `--memray`.** Without that flag the marker is inert and these read as four
 ordinary assertions, which is why the numbers above are recorded here rather than left implicit
@@ -61,3 +72,33 @@ def test_group_by_allocates_one_record_per_group_not_per_item(ev: Evaluator) -> 
 @pytest.mark.limit_memory("4 MB")
 def test_sort_by_decorates_without_copying_the_items(ev: Evaluator) -> None:
     assert len(ev.evaluate("rows | sort_by(_.score)", {"rows": ROWS})) == len(ROWS)
+
+
+# The allocation-heavy pair, and the aggregate shape the budget now bounds. `extend` and `merge`
+# both build a new collection and neither re-evaluates anything, so before the memory policy they
+# were charged one step each however large the result.
+WIDE: list[dict[str, Any]] = [{"id": n} for n in range(20_000)]
+
+
+@pytest.mark.limit_memory("1 MB")
+def test_extend_allocates_one_list_of_references(ev: Evaluator) -> None:
+    assert len(ev.evaluate("a | extend(a)", {"a": WIDE})) == 2 * len(WIDE)
+
+
+@pytest.mark.limit_memory("8 MB")
+def test_merge_allocates_one_mapping(ev: Evaluator) -> None:
+    first = {n: n for n in range(20_000)}
+    second = {n + 10**8: n for n in range(20_000)}
+    assert len(ev.evaluate("merge(a, b)", {"a": first, "b": second})) == 40_000
+
+
+@pytest.mark.limit_memory("64 MB")
+def test_the_aggregate_shape_stays_under_its_ceiling_at_the_budget(ev: Evaluator) -> None:
+    """The shape that allocated 343 MB before the budget charged for size.
+
+    Run here at a row count the policy allows, so the assertion is on what a permitted expression
+    costs rather than on the refusal. The ceiling is what makes the policy's bound visible: push
+    the row count up and the budget stops it before this number moves much further.
+    """
+    text = "x" * 100_000
+    assert len(ev.evaluate("rows | map(t + t)", {"rows": list(range(200)), "t": text})) == 200

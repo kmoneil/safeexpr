@@ -17,7 +17,7 @@ from __future__ import annotations
 import ast
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 from hypothesis import given, settings
@@ -33,6 +33,7 @@ from safeexpr import (
 )
 from safeexpr._collections import COLLECTIONS
 from safeexpr._eval import DEFAULT_STEP_BUDGET
+from safeexpr._guards import SIZE_CHARGE_UNIT
 
 SRC_DIR = Path(__file__).resolve().parent.parent / "src" / "safeexpr"
 
@@ -355,30 +356,137 @@ class TestFunctionCostsAreCharged:
 
 
 class TestWhatTheBudgetDoesNotBound:
-    """Characterisation, not aspiration. These pass today and say so on purpose.
+    """Characterisation, and the framing has changed now that the memory policy has landed.
 
-    A registry function that loops in C rather than re-evaluating an expression is charged its
-    declared cost once, however many items it walks. The budget bounds *evaluation*, and this is
-    the edge of that. It matters much less than it sounds: the unbounded shape is the nested
-    lazy, which is charged per item because each item walks the tree again, while a single pass
-    of `sum` over ten million integers is a fraction of a second. Folding result size into the
-    charge is the memory-amplification policy's business and is cheap to add now that the
-    charging machinery exists.
+    **The charge is on the size of what a function *produces*, not on what it walks**, and that
+    is a decision rather than a leftover gap. `sum` over ten million integers returns one integer:
+    it allocates nothing proportional to its input, holds nothing, and takes a fraction of a
+    second. Charging it for its input would price a scan as though it were an allocation and would
+    make a legitimate aggregate expensive for no reason.
+
+    What actually hurts is holding the result, and that is charged.
     """
 
-    def test_a_single_pass_function_costs_the_same_whatever_it_walks(self) -> None:
+    def test_a_function_that_returns_one_value_costs_the_same_whatever_it_walks(self) -> None:
         small = steps_for("sum(a)", {"a": list(range(10))})
         large = steps_for("sum(a)", {"a": list(range(10_000))})
         assert small == large, (
-            "if this starts failing, single-pass functions have begun charging for their input "
-            "and this test should become an assertion that they do"
+            "the charge is on what a function produces, and `sum` produces one integer whatever "
+            "it was given"
         )
 
-    def test_but_anything_re_evaluating_an_expression_is_charged_per_item(self) -> None:
-        """The half that matters, stated next to the half that does not."""
+    def test_but_a_function_that_returns_a_large_value_is_charged_for_it(self) -> None:
+        """The half the memory policy added. `pluck` walks the same rows `sum` does and keeps
+        every one of them, and keeping is what costs."""
+        small = steps_for("pluck(a, 'k')", {"a": [{"k": 1}] * 10})
+        large = steps_for("pluck(a, 'k')", {"a": [{"k": 1}] * 10_000})
+        assert large > small
+
+    def test_and_anything_re_evaluating_an_expression_is_charged_per_item(self) -> None:
         small = steps_for("map(a, _ + 1)", {"a": list(range(10))})
         large = steps_for("map(a, _ + 1)", {"a": list(range(100))})
         assert large > small * 5
+
+
+class TestProducingALargeValueCostsBudget:
+    """The memory-amplification policy, as the design's option (b).
+
+    The step budget counts nodes evaluated, and a node that allocates is one node however much it
+    allocates. Measured before this: `rows | map(t + t)` over two thousand rows of 100,000
+    characters is a seventeen-character expression that allocated 343 MB, and no per-result cap
+    could see it, because every one of those two thousand strings was comfortably under the cap.
+    Only the total hurt.
+
+    Charging by result size folds memory into the budget with no second knob, which gives one
+    useful property: **a host that wants a tighter memory bound lowers the budget**, and time and
+    memory scale together.
+    """
+
+    def test_the_aggregate_case_that_used_to_allocate_343_megabytes(self) -> None:
+        text = "x" * 100_000
+        with pytest.raises(BudgetExceededError):
+            _evaluator(DEFAULT_STEP_BUDGET).evaluate(
+                "rows | map(t + t)", {"rows": list(range(4000)), "t": text}
+            )
+
+    def test_a_smaller_version_of_the_same_shape_still_runs(self) -> None:
+        """The bound has to land somewhere useful, not refuse the shape outright."""
+        text = "x" * 100_000
+        result = _evaluator(DEFAULT_STEP_BUDGET).evaluate(
+            "rows | map(t + t)", {"rows": list(range(100)), "t": text}
+        )
+        assert len(result) == 100
+
+    @pytest.mark.parametrize(
+        ("source", "context"),
+        [
+            ("a + a", {"a": "x" * 200}),
+            ("rows | map(_)", {"rows": list(range(500))}),
+            ("rows | pluck('k')", {"rows": [{"k": 1}] * 500}),
+            ("parts | join('')", {"parts": ["x" * 100] * 50}),
+            ("a | extend(a)", {"a": list(range(500))}),
+        ],
+    )
+    def test_producing_more_costs_more(self, source: str, context: dict[str, Any]) -> None:
+        bigger = {
+            key: (value * 4 if isinstance(value, (str, list)) else value)
+            for key, value in context.items()
+        }
+        assert steps_for(source, bigger) > steps_for(source, context)
+
+    def test_a_small_value_costs_nothing_extra(self) -> None:
+        """**Integer division is the point.** Anything under the charging unit costs nothing, so
+        an ordinary rule building short strings pays exactly what it paid before."""
+        short = steps_for("a + b", {"a": "x", "b": "y"})
+        plain = steps_for("a + b", {"a": 1, "b": 2})
+        assert short == plain
+
+    def test_the_charge_scales_with_the_unit(self) -> None:
+        rows = list(range(SIZE_CHARGE_UNIT * 10))
+        cost = steps_for("rows | map(_)", {"rows": rows})
+        bare = steps_for("rows | map(_)", {"rows": rows[:1]})
+        assert cost - bare >= len(rows) // SIZE_CHARGE_UNIT
+
+    def test_lowering_the_budget_lowers_the_memory_bound_with_it(self) -> None:
+        """The property that makes one knob enough."""
+        context = {"rows": list(range(200)), "t": "x" * 100_000}
+        assert _completes("rows | map(t + t)", context, DEFAULT_STEP_BUDGET)
+        assert not _completes("rows | map(t + t)", context, 100_000)
+
+
+class TestLegitimateWorkAtScaleStillPasses:
+    """The other half of the acceptance criteria, and the half a careless policy would break.
+
+    The design commits to 10^5 items. Every one of these runs in under a fifth of a second at the
+    default budget.
+    """
+
+    ORDERS: ClassVar[list[dict[str, Any]]] = [
+        {
+            "customer_id": f"c{n % 500}",
+            "status": "paid" if n % 3 else "open",
+            "items": [1, 2],
+            "name": f"Name {n}",
+            "value": n,
+        }
+        for n in range(100_000)
+    ]
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            'orders | where(_.status == "paid") | group_by(_.customer_id)'
+            ' | map(merge(_, {"n": len(_.items)}))',
+            "orders | where(_.value > 50000) | first",
+            "orders | map(_.name) | unique_by(_) | len",
+            "orders | map(lower(_.name)) | len",
+            'orders | map(_.name + "!") | len',
+            "orders | sort_by(_.value) | take(10) | len",
+        ],
+    )
+    def test_it_runs_at_a_hundred_thousand_items(self, source: str) -> None:
+        evaluator = _evaluator(DEFAULT_STEP_BUDGET)
+        assert evaluator.evaluate(source, {"orders": self.ORDERS}) is not None
 
 
 class TestRegressions:
