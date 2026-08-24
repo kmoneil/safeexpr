@@ -100,6 +100,38 @@ def _length_of(source: str) -> int:
     raise AssertionError("unreachable")  # pragma: no cover
 
 
+def check_source(source: str) -> None:
+    """Refuse a source that must not reach anything else, before anything else sees it.
+
+    Separate from `parse` because it has to run **before the compile cache is touched**, not only
+    before the parser. A cache keyed on the source text would otherwise be the first thing to
+    handle hostile input: an unhashable argument would raise `TypeError` out of a dict lookup
+    rather than the package's own error, and a multi-megabyte string would be hashed in full
+    before anything had decided it was too long. Both are the caller's mistake and both should be
+    reported as such, at the boundary, in this package's own vocabulary.
+
+    Args:
+        source: The expression text. Must be `str`; `bytes` is rejected explicitly, because
+            `ast.parse` accepts it and would otherwise let a type confusion through silently.
+
+    Raises:
+        ParseError: If `source` is not `str`, or cannot be encoded.
+        SourceTooLongError: If the source exceeds `MAX_SOURCE_BYTES`.
+    """
+    if not isinstance(source, str):
+        # No `from None` here: nothing is being handled at this point, so there is no context
+        # to suppress. Writing one would imply `from None` is what protects the other paths,
+        # and the block in `parse` explains at length why it is not.
+        raise ParseError(
+            f"expression must be str, not {type(source).__name__}",
+            source="",
+        )
+
+    size = _length_of(source)
+    if size > MAX_SOURCE_BYTES:
+        raise SourceTooLongError(size, MAX_SOURCE_BYTES)
+
+
 def parse(source: str) -> ast.Expression:
     """Parse `source` into a single Python expression, or raise `ParseError`.
 
@@ -118,18 +150,10 @@ def parse(source: str) -> ast.Expression:
         ParseError: For every other failure, including the resource exhaustion cases that are
             not `SyntaxError`.
     """
-    if not isinstance(source, str):
-        # No `from None` here: nothing is being handled at this point, so there is no context
-        # to suppress. Writing one would imply `from None` is what protects the other paths,
-        # and the block below explains at length why it is not.
-        raise ParseError(
-            f"expression must be str, not {type(source).__name__}",
-            source="",
-        )
-
-    size = _length_of(source)
-    if size > MAX_SOURCE_BYTES:
-        raise SourceTooLongError(size, MAX_SOURCE_BYTES)
+    # Repeated on the cached path rather than skipped there, so that "the cap runs before the
+    # parser" stays a property of this function and not of whoever remembered to call the other
+    # one. It costs one `str.encode` on an input already capped at 2 KB.
+    check_source(source)
 
     if not source.strip():
         # `ast.parse("")` reports `invalid syntax (<unknown>, line 0)`, and line 0 does not

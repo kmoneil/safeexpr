@@ -291,6 +291,57 @@ in; the remaining function tiers and the evaluation budget are not.
   scan now covers them too.
 
 ### Changed
+- **An evaluator compiles each source once instead of on every call**, which is **13 to 14x** on a
+  rule that does not touch a collection. `evaluate()` parsed, rewrote and validated the source on
+  every call and threw the result away; all of that depends only on `(source, registry)`, and the
+  registry is fixed when the evaluator is built. For the three flat shapes among the design's
+  canonical five it was **91% of the wall clock**: a feature flag's eleven steps cost 2.7 us and
+  the call cost 33.1 us.
+
+  | Case | Cold | Warm | |
+  | --- | --- | --- | --- |
+  | feature flag | 40.6 us | 2.9 us | **14.0x** |
+  | authorization | 38.4 us | 2.8 us | **13.7x** |
+  | workflow condition | 34.0 us | 2.6 us | **13.3x** |
+  | alerting rule, 1,000 rows | 1,193.3 us | 1,105.4 us | 1.08x |
+  | pipeline, 1,000 rows | 1,704.9 us | 1,609.9 us | 1.06x |
+
+  The collection rows are not a win and are not claimed as one: their fixed cost was already under
+  5%. A cold call is about 20% dearer than the old total, since it now also builds and stores the
+  entry, and it is paid once per distinct source per evaluator.
+
+  **The module-level `evaluate()` now shares one evaluator** rather than building a fresh one per
+  call. A per-instance cache on a per-call instance is no cache at all, and that function is the
+  one most readers try first.
+
+  Two things a host should know. Build the evaluator once and keep it, which
+  [Embedding safeexpr](docs/embedding.md) already recommended and which now also decides whether
+  you get the warm column. And the cache holds **128 entries per evaluator** and is dropped whole
+  when it fills, so rotating through more than 128 distinct sources on one evaluator misses every
+  time, which costs what this package cost before and nothing worse.
+
+- **The shadowed-pipe refusal is still decided per call**, and that is the part of this change
+  worth reading. It reads `context.keys()`, so it is a decision about the data rather than about
+  the source. What is cached is the table it consults; the decision is not. `flags | first` must
+  succeed against `{"flags": [...]}` and raise `ReservedNameError` against
+  `{"flags": [...], "first": 9}`, from the same cache entry, in either order.
+
+- **Q10's wording changed, and the contract did not.** "Immutable after construction" stopped
+  being literally true. The substance was always that **no evaluation can observe state left by
+  another**, which is what the concurrency tests assert; that is the wording now, in the README,
+  in `docs/embedding.md` and in the decision record. Both caches are memoisation caches and both
+  are invisible to the step budget, proved by bisecting the smallest budget that evaluates on a
+  cold cache and again on a warm one. The structural scan that enforces "no mutable module state"
+  was extended to instance state in the same change, so the next piece of per-instance state has
+  to argue for itself rather than inherit this one's argument.
+
+- **`MAX_COMPILE_CACHE` is published in the limits table** with the measurement that set it: 4.1
+  KiB per ordinary rule against 262.6 KiB for the widest source the cap admits, so 0.52 MiB
+  against 32.8 MiB at the bound. It is bounded rather than a plain dict because a host that
+  accepts expression text from an untrusted source would otherwise hold an unbounded allocation
+  keyed by that text.
+
+### Changed
 - **Attribute access on a mapping is 5 to 14% faster on the collections tier**, and nothing else
   about it moved. `_attribute` tested `isinstance(value, Mapping)`, which runs once per attribute
   per item; `collections.abc.Mapping.__instancecheck__` is Python-level and dispatches into
