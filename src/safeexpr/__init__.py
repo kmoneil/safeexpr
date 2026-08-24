@@ -8,9 +8,18 @@
 Two promises come with it. Every failure is a `SafeExprError`, and no error carries a reference
 to the data that caused it; see `_errors` for why the second one is harder than it looks.
 
-Pipes, lazy arguments and the function registry are still being built, so `where`, `map` and
-friends are not available yet. What works today is comparison, arithmetic, field access and
-indexing over ordinary data.
+Functions are opt-in. `Evaluator()` starts with an empty registry and evaluates comparison,
+arithmetic, field access and indexing; `standard_registry()` adds the collections tier, and with
+it pipes:
+
+    >>> from safeexpr import Evaluator, standard_registry
+    >>> rules = Evaluator(registry=standard_registry())
+    >>> rules.evaluate('metrics | where(_.value > 10) | first',
+    ...                {"metrics": [{"value": 4}, {"value": 40}]})
+    {'value': 40}
+
+Opting in rather than defaulting is deliberate, because a registered name is reserved on the
+right of a `|`. See `_stdlib` for the argument.
 """
 
 from __future__ import annotations
@@ -24,10 +33,14 @@ from ._errors import (
     ValidationError,
 )
 from ._eval import Evaluator, evaluate
+from ._registry import Function, FunctionError
+from ._stdlib import standard_registry
 
 __all__ = [
     "EvaluationError",
     "Evaluator",
+    "Function",
+    "FunctionError",
     "InternalError",
     "ParseError",
     "SafeExprError",
@@ -35,6 +48,7 @@ __all__ = [
     "ValidationError",
     "__version__",
     "evaluate",
+    "standard_registry",
 ]
 
 # Pre-release. The first PyPI upload should carry a real, working surface rather than a

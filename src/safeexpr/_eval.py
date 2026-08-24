@@ -37,7 +37,7 @@ from typing import Any, ClassVar
 from ._errors import EvaluationError, SafeExprError, contained
 from ._parse import parse
 from ._pipes import transform
-from ._registry import Function, as_function
+from ._registry import Function, FunctionError, as_function, describe_type
 from ._validate import validate
 
 # **A cap on the result size, not on the exponent, and the difference is measured.**
@@ -186,15 +186,6 @@ def _suggest(name: str, candidates: Sequence[str]) -> str:
     return f", did you mean `{close[0]}`?" if close else ""
 
 
-def _describe_type(value: object) -> str:
-    """Name a value's type for an error message.
-
-    The type name only. A `repr` of the value would put the caller's data into a string the
-    expression author reads, which is the leak R8 exists to prevent.
-    """
-    return type(value).__name__
-
-
 class Evaluator:
     """Evaluates expressions against a context.
 
@@ -340,7 +331,7 @@ class Evaluator:
         raise _error(
             run,
             node,
-            f"cannot read `.{node.attr}` on a value of type `{_describe_type(value)}`; "
+            f"cannot read `.{node.attr}` on a value of type `{describe_type(value)}`; "
             f"attribute access works on mappings, and on other types only where the host has "
             f"registered them",
         )
@@ -367,8 +358,8 @@ class Evaluator:
             raise _error(
                 run,
                 node,
-                f"cannot index a value of type `{_describe_type(value)}` "
-                f"with a `{_describe_type(key)}`",
+                f"cannot index a value of type `{describe_type(value)}` "
+                f"with a `{describe_type(key)}`",
             ) from None
         raise _error(run, node, f"no entry for {key!r}")
 
@@ -450,8 +441,7 @@ class Evaluator:
             failure = _error(
                 run,
                 node,
-                f"cannot apply `{symbol}` to `{_describe_type(left)}` "
-                f"and `{_describe_type(right)}`",
+                f"cannot apply `{symbol}` to `{describe_type(left)}` and `{describe_type(right)}`",
             )
         except (OverflowError, ValueError):
             failure = _error(run, node, f"`{symbol}` produced a result that cannot be represented")
@@ -478,7 +468,7 @@ class Evaluator:
             failure = _error(
                 run,
                 node,
-                f"cannot apply `**` to `{_describe_type(base)}` and `{_describe_type(exponent)}`",
+                f"cannot apply `**` to `{describe_type(base)}` and `{describe_type(exponent)}`",
             )
         raise failure
 
@@ -488,7 +478,7 @@ class Evaluator:
             return _UNARYOPS[type(node.op)](value)
         except TypeError:
             pass
-        raise _error(run, node, f"cannot apply this operator to `{_describe_type(value)}`")
+        raise _error(run, node, f"cannot apply this operator to `{describe_type(value)}`")
 
     def _boolop(self, node: ast.BoolOp, run: _Run) -> Any:
         """`and` / `or`, short-circuiting and returning the deciding value, as Python does.
@@ -515,7 +505,7 @@ class Evaluator:
                 raise _error(
                     run,
                     node,
-                    f"cannot compare `{_describe_type(left)}` with `{_describe_type(right)}`",
+                    f"cannot compare `{describe_type(left)}` with `{describe_type(right)}`",
                 ) from None
             if not outcome:
                 return False
@@ -546,6 +536,19 @@ class Evaluator:
                 f"`{name}` is not a function{_suggest(name, sorted(self._registry))}"
                 + ("; values from the context cannot be called" if name in run.context else ""),
             )
+        # **Arity before arguments.** Checked here, not by letting the call raise `TypeError`,
+        # because those two failures are indistinguishable once they arrive: a function handed
+        # the wrong *number* of arguments and a function handed the wrong *kind* both raise
+        # `TypeError`, and the handler below used to report both as a miscount. It also means a
+        # miscounted call does not evaluate its arguments first.
+        #
+        # A bare callable declares no arity and is left unchecked, exactly as before.
+        if not function.accepts(len(node.args)):
+            raise _error(
+                run,
+                node,
+                f"`{name}` takes {function.arity_text()}, got {len(node.args)}",
+            )
         # **The lazy positions are simply not evaluated.** No side table, no synthetic names, no
         # rewritten tree: the function said which of its arguments are expressions, so those
         # arrive as a `LazyExpr` over the original subtree and everything else arrives as a value.
@@ -557,8 +560,27 @@ class Evaluator:
             return function.call(*arguments)
         except SafeExprError:
             raise
+        except FunctionError as objection:
+            # A function saying what is wrong with the values it was given. It knows what; only
+            # this layer knows where, so the message is positioned here. Nothing but the string
+            # crosses over, which is why `FunctionError` is allowed to carry nothing else.
+            failure = _error(run, node, f"`{name}`: {objection}")
         except TypeError:
-            failure = _error(run, node, f"`{name}` cannot accept {len(arguments)} argument(s)")
+            # **Two different failures wearing one exception type.** A function handed the wrong
+            # number of arguments and a function handed the wrong kind of value both raise
+            # `TypeError` here, and this handler used to report both as a miscount, which is a
+            # false statement about a call whose argument count was fine.
+            #
+            # An informative arity that the call already satisfied settles it: a miscount is
+            # ruled out, so the message can say what actually happened. Where nothing was
+            # declared it still might be either, and the older wording is the honest one.
+            failure = _error(
+                run,
+                node,
+                f"`{name}` cannot work with the values it was given"
+                if function.checks_arity
+                else f"`{name}` cannot accept {len(arguments)} argument(s)",
+            )
         except (ValueError, KeyError, IndexError, ZeroDivisionError, OverflowError):
             # A registry function objecting to its input. The exception type is not reported:
             # these are our own functions and the useful part is which call failed.

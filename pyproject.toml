@@ -146,6 +146,25 @@ dev = [
   "ruff>=0.14",
   "mypy>=1.13",
 ]
+# The tools that produce numbers rather than a pass or a fail: coverage, timings, allocation
+# ceilings.
+#
+# **A separate group, and not a default one, because `uv sync --frozen` installs the default
+# groups and CI runs the suite with them.** Folding these into `dev` would put `rich`, `textual`
+# and a compiled tracer into the environment that runs the tests of a package whose entire pitch
+# is that it has no dependencies, and would add ten seconds of timing noise to every `fast` run
+# to measure something only meaningful on an idle machine. Locked here so `--frozen` stays valid,
+# installed only when asked for:
+#
+#     uv sync --frozen --group measure
+#
+# `tests/benchmarks/conftest.py` skips that directory when these are absent, which is what keeps
+# the `compat` and `corpus` matrix rows green with nothing but pytest and hypothesis installed.
+measure = [
+  "pytest-cov>=6.0",
+  "pytest-benchmark>=5.1",
+  "pytest-memray>=1.7",
+]
 
 # The lock resolves for the development interpreter rather than the floor. The floor is a promise
 # about `src/`, not about the toolchain, and dragging pytest and mypy back to what 3.11 supports
@@ -217,12 +236,15 @@ ban-relative-imports = "parents"
 # `scripts/` inverts T20: printing the lane table *is* what the runner does, so "no print" there
 # would be a rule against the program.
 "scripts/**" = ["T20", "S603"]
-# ANN401 forbids `typing.Any`, and it is right almost everywhere. It is wrong here. This module
-# evaluates a dynamically-typed expression language: the type of a result *is* whatever the
-# expression produced, and the node handlers take and return exactly that. Annotating them
-# `object` would be no more truthful and would push a cast onto every caller. The rule stays on
-# for the rest of the package, where a stray `Any` really would be a missing annotation.
+# ANN401 forbids `typing.Any`, and it is right almost everywhere. It is wrong in these two.
+# They evaluate a dynamically-typed expression language: the type of a value *is* whatever the
+# expression produced, and the node handlers and the registry tiers take and return exactly that.
+# Annotating them `object` would be no more truthful and would push a cast onto every caller. The
+# rule stays on for the rest of the package, where a stray `Any` really would be a missing
+# annotation. It also stays on for `_registry.py`, whose own signatures are about entries rather
+# than about values.
 "src/safeexpr/_eval.py" = ["ANN401"]
+"src/safeexpr/_collections.py" = ["ANN401"]
 "tests/**" = ["D", "ANN", "S101", "S603", "S607", "PLR2004", "T20"]
 
 # ---------------------------------------------------------------------------
