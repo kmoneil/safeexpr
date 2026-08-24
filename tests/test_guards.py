@@ -142,15 +142,39 @@ class TestEveryPathThatCompares:
             assert isinstance(outcome, bool)
 
     @pytest.mark.parametrize("source", ["a < b", "a == b"])
-    def test_nesting_past_every_interpreter_s_limit_is_always_refused(
+    def test_far_past_every_measured_threshold_the_promise_still_holds(
         self, ev: Evaluator, source: str
     ) -> None:
-        """Above the highest measured threshold, so every supported interpreter reaches the
-        handler. 3.14's is 60,000, the others' is 20,000."""
-        with pytest.raises(EvaluationError) as caught:
-            ev.evaluate(source, {"a": nest_list(120_000), "b": nest_list(120_000)})
-        assert "recursed without end" in str(caught.value)
-        assert "bug in safeexpr" not in str(caught.value)
+        """**This named a threshold and CI proved the threshold wrong.**
+
+        It used to require a *refusal* at 120,000 levels, chosen as twice the deepest limit
+        measured locally, and 3.14 on a GitHub runner compared that without complaint. Nothing
+        was wrong with the package: comparing succeeded, which is one of the two outcomes the
+        promise allows. The test was wrong.
+
+        Where comparison gives out is not merely interpreter-dependent, it is **stack**-dependent.
+        3.14 bounds recursion by the space actually available rather than by a counter, so the
+        depth moves with the thread that runs it, and no constant is safe on every machine. The
+        test three above says exactly this in its own docstring and was written to avoid exactly
+        this mistake; this one made it anyway, one screen further down.
+
+        So this asserts the promise, at a depth far past where three of the four interpreters give
+        out. **What guarantees the `RecursionError` handler is reached at all is
+        `test_self_referential_values`**, because a cycle recurses without bound whatever the
+        stack size. A guarantee that depends on a threshold belongs with the input that has none.
+        """
+        context = {"a": nest_list(120_000), "b": nest_list(120_000)}
+        outcome: Any = None
+        refused: EvaluationError | None = None
+        try:
+            outcome = ev.evaluate(source, context)
+        except EvaluationError as caught:
+            refused = caught
+        if refused is not None:
+            assert "recursed without end" in str(refused)
+            assert "bug in safeexpr" not in str(refused)
+        else:
+            assert isinstance(outcome, bool)
 
     def test_self_referential_values(self, ev: Evaluator) -> None:
         first, second = cyclic_pair()
