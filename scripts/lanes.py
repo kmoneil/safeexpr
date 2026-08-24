@@ -72,6 +72,21 @@ LANES: tuple[Lane, ...] = (
         command=("python", "scripts/check_zero_deps.py"),
     ),
     Lane(
+        name="sdist",
+        checks=(
+            "the promise `pyproject.toml` makes about the source distribution: that a downstream "
+            "packager can rebuild from it and run this suite to validate the build"
+        ),
+        needs=(
+            "uv, and an interpreter with only a test runner in it. **The isolation is the lane**, "
+            "for the same reason as `zero-deps`: a checkout has `.github/`, `.git`, `uv.lock` and "
+            "a synced environment, and the distribution has none of them, so running the suite "
+            "here says nothing about whether it runs there. The first run of this found "
+            "`test_lanes.py` failing from the sdist on a file that is deliberately not in it"
+        ),
+        command=("python", "scripts/check_sdist.py"),
+    ),
+    Lane(
         name="fast",
         checks="the unit suite on the development interpreter",
         needs="uv sync --frozen",
