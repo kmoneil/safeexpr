@@ -22,7 +22,15 @@ import re
 import pytest
 
 import safeexpr
-from _docs import EM_DASH, ROOT, pyproject, read, relative_link_targets, supported_pythons
+from _docs import (
+    EM_DASH,
+    ROOT,
+    pyproject,
+    read,
+    relative_link_targets,
+    slugs,
+    supported_pythons,
+)
 from safeexpr import Evaluator, SafeExprError, standard_registry
 from safeexpr._eval import DEFAULT_STEP_BUDGET, MAX_POWER_RESULT_BITS
 from safeexpr._guards import MAX_DATA_NESTING, MAX_RESULT_SIZE, SIZE_CHARGE_UNIT
@@ -278,6 +286,21 @@ class TestTheDocumentItself:
     def test_relative_links_resolve(self, readme: str) -> None:
         for target in relative_link_targets(readme):
             assert (ROOT / target).exists(), f"link points at nothing: {target}"
+
+    def test_anchors_into_the_docs_resolve(self, readme: str) -> None:
+        """`docs/` has had this check since it was written and the README had not.
+
+        `test_relative_links_resolve` above strips the anchor before checking, so a link to a
+        section that does not exist resolves to a file that does and passes. The front page is the
+        one document where that matters most: it is what a reader follows first, and a link that
+        lands them at the top of a long page instead of the paragraph they were promised is a small
+        lie that nothing else notices. Found by writing one.
+        """
+        for target, anchor in re.findall(r"\]\((docs/[a-z-]+\.md)#([a-z0-9-_]+)\)", readme):
+            available = slugs((ROOT / target).read_text(encoding="utf-8"))
+            assert anchor in available, (
+                f"the README links to {target}#{anchor}, which is not a heading there"
+            )
 
     def test_no_em_dashes(self, readme: str) -> None:
         assert EM_DASH not in readme
