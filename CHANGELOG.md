@@ -291,6 +291,39 @@ in; the remaining function tiers and the evaluation budget are not.
   scan now covers them too.
 
 ### Changed
+- **A bare `pytest` is 33% faster**, 58.8 s to 39.6 s measured on one machine, and CI still runs
+  everything. Two tests were **17.9 s of a 58.8 s suite**: `test_the_table` and `test_the_json`
+  each run `scripts/limits.py --quick` as a subprocess, and the script does real timing work,
+  which is the point of it.
+
+  They are marked `slow` and deselected from the inner loop. `scripts/lanes.py` passes
+  `--runslow` in the `fast`, `compat` and `sdist` lanes, so **nothing stops running where a green
+  result is meant to mean the suite passed**, and `test_regression_limits_the_script_still_runs_in_ci`
+  asserts both ends of that: the lane's command carries the flag and CI invokes the lane. A
+  marker that quietly stopped running in CI would be strictly worse than the ten seconds it saved.
+
+  A slow suite changes engineering behaviour long before it fails a gate: people stop running it,
+  batches get larger, and feedback time becomes the real constraint. `pytest --runslow` runs the
+  lot, and `pytest -m slow` runs only these two.
+
+  Two cheaper-looking fixes were rejected. Adding a `--both` mode to `scripts/limits.py` so one
+  invocation serves both tests halves the cost and means changing a published script's command
+  line so a test can run faster, which is the wrong way round: the script is documented in
+  [Performance](docs/performance.md) as the thing a reader runs to reproduce the table on their
+  own machine, and its interface belongs to them. **Reducing what `--quick` measures is ruled
+  out**: cutting sample counts is how a measurement becomes a flake, this repository has already
+  fixed one flake in exactly that file for exactly that reason, and
+  `test_regression_limits_the_samples_were_not_quietly_reduced` now reads the script and asserts
+  it still takes the minimum of five rather than a median of three.
+
+- **The suite now reports its own wall time and refuses a step change in it.** Printed on every
+  full run, with a 240 s tripwire beside it, which is roughly four times the number it protects.
+  A ceiling near the measurement fails on a busy machine and gets deleted rather than
+  investigated; what this catches is somebody adding a test that takes a minute. It arms only for
+  the default selection, because a subset is faster by construction and timing one against a
+  whole-suite ceiling would be measuring nothing.
+
+### Changed
 - **An evaluator compiles each source once instead of on every call**, which is **13 to 14x** on a
   rule that does not touch a collection. `evaluate()` parsed, rewrote and validated the source on
   every call and threw the result away; all of that depends only on `(source, registry)`, and the

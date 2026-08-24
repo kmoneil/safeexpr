@@ -88,9 +88,19 @@ LANES: tuple[Lane, ...] = (
     ),
     Lane(
         name="fast",
-        checks="the unit suite on the development interpreter",
-        needs="uv sync --frozen",
-        command=("pytest",),
+        checks=(
+            "the unit suite on the development interpreter, including the tests a bare `pytest` "
+            "leaves out"
+        ),
+        needs=(
+            "uv sync --frozen. **`--runslow` is not optional here and that is the point of it.** "
+            "Two tests run `scripts/limits.py` as a subprocess and were a third of the suite's "
+            "wall time, so they are deselected from a developer's inner loop and run in full "
+            "wherever a green result has to mean something. A marker that quietly stopped running "
+            "in CI would be strictly worse than the ten seconds it saved, and "
+            "`tests/test_limits.py` asserts this flag is here"
+        ),
+        command=("pytest", "--runslow"),
     ),
     Lane(
         name="corpus",
@@ -130,9 +140,12 @@ LANES: tuple[Lane, ...] = (
         ),
         needs=(
             "an environment built for the matrix row's interpreter, which is what `_resolve` "
-            "below looks for beside `sys.executable` before it falls back to `.venv/`"
+            "below looks for beside `sys.executable` before it falls back to `.venv/`. "
+            "`--runslow` for the same reason as `fast`: the limits the script measures are "
+            "interpreter behaviour, so the matrix is exactly where those two tests are worth "
+            "their wall time"
         ),
-        command=("pytest",),
+        command=("pytest", "--runslow"),
     ),
 )
 
