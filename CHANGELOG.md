@@ -353,12 +353,12 @@ in; the remaining function tiers and the evaluation budget are not.
   machine-to-machine variance. Committed baselines were rejected: they age against a moving runner
   fleet and the refresh becomes a chore nobody owns.
 
-  **The gate is `min`, over 15%, and both halves of that are measured.** Two runs of identical
-  code on the runner deviate by up to 4.4% on a single row, and 15% is 3.4x that. The statistic
-  matters more than the number: on a busy development machine the same comparison gives min 2.7%,
-  median 9.2% and **mean 32.2%**, because one outlier in twenty thousand rounds moves a mean
-  further than any effect being measured. `scripts/measure.py` therefore refuses to be set on the
-  mean at its argument parser, with the reason in the error.
+  **The gate is `min`, over 20%, and both halves of that are measured.** Five comparisons of
+  unchanged code on the runner deviate by up to 7.4% on a single row, and 20% is 2.7x that. The
+  statistic matters more than the number: on a busy development machine the same comparison gives
+  min 2.7%, median 9.2% and **mean 32.2%**, because one outlier in twenty thousand rounds moves a
+  mean further than any effect being measured. `scripts/measure.py` therefore refuses to be set on
+  the mean at its argument parser, with the reason in the error.
 
   Each run also prints **that runner's own noise floor**, from the two head runs, directly above
   the gate, so a red row can be read against the variance it was measured in rather than against a
