@@ -9,6 +9,19 @@ metrics | where(_.value > threshold) | first
 orders | where(_.status == "paid") | group_by(_.customer_id)
 ```
 
+## Install
+
+Not published yet. The first release will be:
+
+```console
+pip install safeexpr
+```
+
+One pure-Python wheel, `py3-none-any`, no compiled artifacts, and nothing else pulled in. That
+last part is the product rather than a detail, so it is asserted three ways rather than promised:
+`tests/test_zero_deps.py` reads the built metadata, `scripts/check_zero_deps.py` imports a built
+wheel in an interpreter that has nothing else in it, and the `zero-deps` CI lane runs the second.
+
 ## Status
 
 **Alpha.** The evaluator works for comparison, arithmetic, field access and indexing:
@@ -117,11 +130,146 @@ sitting in a comment.
 | Step budget | 6,000,000 | 538,433, the heaviest use case at 10⁵ items | 11.1x |
 | Power result | 1 MiB of integer | set by measured time; no rule needs large powers | |
 
+### What happens past one
+
+Every limit refuses rather than degrades, and each refusal is a `SafeExprError` that names what
+was exceeded and by how much. Nothing is truncated, nothing is silently approximated, and no
+limit is a warning.
+
+| Past this | You get |
+| --- | --- |
+| Source length | `SourceTooLongError`, before `ast.parse` ever sees the source |
+| Expression nesting | `ValidationError`, naming the depth and the cap |
+| Step budget | `BudgetExceededError` |
+| Result size, power result, data nesting | `EvaluationError` |
+
+**The supported scale is ten times a hundred thousand items**, on the heaviest of the five
+canonical use cases, and that is the design's own rule of ten times observed need applied to a
+measurement rather than to a guess. Past it you get `BudgetExceededError` rather than a slow
+answer, which is the whole point of a counter: the failure is deterministic, it is the same on
+every platform and in every thread, and it arrives before the work does rather than after.
+
+If a hundred thousand items is not your scale, say how much more you need. There is deliberately
+no value meaning "unlimited": a bound you cannot express is a bound you cannot review.
+
+### Changing them
+
+Three are constructor arguments on `Evaluator`, and those three are the whole configuration
+surface:
+
+| Argument | Default | What it decides |
+| --- | --- | --- |
+| `registry` | empty | The only names an expression may call. `standard_registry()` is the forty-one shipped functions |
+| `attribute_types` | empty | Opt-in `getattr`, as type to permitted attribute names |
+| `budget` | 6,000,000 | Steps one `evaluate` call may spend. Per call, not per evaluator |
+
+```python
+rules = Evaluator(registry=standard_registry(), budget=60_000_000)
+```
+
+**`attribute_types` is the one argument that gives something up**, and it is worth saying plainly:
+registering a type opts that type back into attribute traversal, which is where essentially every
+published Python sandbox escape has started. It is limited to the attribute names you list, and
+what you list is yours to defend. Everything else in this package is closed by default; this is
+the door, and it only opens from your side.
+
+Every other limit is a module constant rather than configuration. Source length is set by CPython
+3.11's parser rather than by preference, and the rest are set from measurement at ten times
+observed need. They are readable (`safeexpr._validate.MAX_EXPRESSION_DEPTH` and friends) and
+changing one means changing the package, which is the intended difficulty: they bound what an
+expression can do to your process, and a knob for that is a knob an over-eager caller turns.
+
 **Reference timing.** The five canonical use cases at 100,000 items: the heaviest is the pipeline
 at 538,433 steps in 153 ms, and the rate is **4.0 to 5.4 steps per item**, stable across 10³, 10⁴
 and 10⁵. That rate is what makes a budget expressible in items rather than in nodes: at the
 originally proposed 100,000 steps it would have covered about twenty thousand items and raised on
 a hundred thousand.
+
+## Thread safety
+
+**One `Evaluator` is safe to share between threads, and that is a contract rather than an
+observation.** It is immutable after construction: the registry and the permitted attribute types
+are copied at construction rather than held, so a host that keeps the dict it passed in cannot
+change what an evaluator can do afterwards, and `__slots__` means nothing can be attached later.
+
+Everything one evaluation needs lives in a call-scoped object: **the step counter and the `_`
+scope stack included**. The budget is therefore per call and not per evaluator, so two threads
+never spend each other's, and a thread that exhausts its budget refuses its own evaluation and
+nothing else. A counter on the instance would have made a shared evaluator quietly wrong under
+concurrency, with an error naming the budget rather than the sharing.
+
+Nothing here starts a thread, installs a signal handler or sets a timeout, so there is no
+interaction with whatever your host already does about any of those. That is a consequence of the
+budget being a counter rather than a clock.
+
+One thing is shared process-wide: **a bounded cache of compiled regular-expression patterns**.
+Compiling a pattern is a pure function of the pattern string, so a hit and a miss produce the same
+result, and `matches` is charged its declared cost either way, so the cache is invisible to the
+budget. The language has no clock, so nothing inside an expression can observe it at all.
+`tests/test_thread_safety.py` asserts each of these, including that a cold cache and a warm one
+cost exactly the same number of steps.
+
+## Non-goals
+
+These are not "not yet". They are the shape of the package, and each one is load-bearing.
+
+- **Not Turing-complete.** No loops, no recursion, no user-defined functions, no assignment, no
+  walrus, no comprehensions, no lambdas. The absence of iteration constructs is the termination
+  guarantee, and the step budget is only a backstop behind it. Several of these read as
+  ergonomic and are not: comprehensions and generators expose `gi_frame`, which is a published
+  escape in another sandbox, so "no comprehensions" is a security decision. See F6 in
+  `THREAT-MODEL.md`.
+- **No I/O of any kind, ever.** No files, no sockets, no subprocesses, no imports. This is not a
+  query language for an external store, and there is no plan for it to become one. The
+  audit-hook tripwire under `How this is tested` exists to keep this true by observation rather
+  than by intention.
+- **Not CEL, and not CEL-compatible.** The semantics are close enough to be useful and are not a
+  promise. Anyone who needs CEL semantics should pay CEL's dependency cost rather than ask this
+  package to grow into them.
+- **No string interpolation.** f-strings, and t-strings on 3.14, are rejected by the node
+  allowlist. This is F1 rather than taste, and it is worth spelling out because the syntax looks
+  inert: `f"{obj}"` calls that object's own `__format__`, `f"{obj!r}"` its `__repr__`, `f"{obj!s}"`
+  its `__str__`, and `f"{obj:{spec}}"` hands its `__format__` a spec computed at runtime. That is
+  four ways to run a context object's own code, on values the `str` function already refuses to
+  convert for exactly that reason, wearing a syntax a static check reads as one node. Use `+` or
+  `join` to build strings. If interpolation is ever allowed, the corpus entries proving the
+  conversions are unreachable land in the same change, not after it.
+- **No custom grammar, ever.** The syntax is a strict subset of Python's own expression grammar,
+  parsed by stdlib `ast`. One extension Python's parser cannot express means shipping a parser
+  generator, and that is the end of the package: the pitch is one pure-Python wheel, and a
+  grammar of our own is how that stops being true.
+
+## Alternatives
+
+The honest version, with the figures checked against PyPI metadata on 2026-08-23. Re-check them
+before quoting them anywhere; a dependency count is a fact with a date on it.
+
+| Package | Version checked | Runtime deps | What you give up |
+| --- | --- | --- | --- |
+| **safeexpr** | unreleased | **0** | The gap between the two rows below it |
+| `simpleeval` | 1.0.7 | 0 | No dot access on dicts, no data functions, no pipes. Deliberately bare |
+| `asteval` | 1.0.10 | 0 | Denylist-leaning, with the escape history that implies |
+| `RestrictedPython` | 8.5 | 0 | Transforms whole modules rather than evaluating expressions. ZPL-2.1 |
+| `jmespath` | 1.1.0 | 0 | Query only: no arithmetic to speak of, no conditionals, no joins |
+| `cel-python` | 0.5.0 | 6 | Nothing, on capability. Six runtime dependencies is the price |
+
+`cel-python`'s six are `google-re2`, `jmespath`, `lark`, `pendulum`, `pyyaml` and `tomli` (below
+3.11). That means a parser generator and a compiled regular-expression engine, so platform wheels
+and a longer procurement conversation. CEL also mandates re2 regex syntax.
+
+Two notes on that table that matter more than the counts:
+
+- **`asteval` no longer requires numpy.** Version 1.0.10 has zero runtime dependencies and numpy
+  is optional. Older comparisons say otherwise, this one included in an earlier draft, and
+  repeating it would be unfair.
+- **`RestrictedPython` is ZPL-2.1, not MIT.** It can be studied and it cannot be copied from,
+  which is why nothing here is derived from it.
+
+Every claim about another project's escape history lives in `THREAT-MODEL.md` with its advisory
+identifier, rather than as an adjective here.
+
+**Go is not in this table on purpose.** `expr-lang/expr` is mature, fast and effectively
+dependency-free, so the Go slot is filled. This package is Python only.
 
 ## How this is tested
 
@@ -149,6 +297,23 @@ Beyond the escape corpus, three things run on every supported interpreter:
 > defense in depth for a config-authoring surface. If you must run genuinely hostile input, use
 > process isolation. No in-interpreter CPython sandbox, this one included, should be your only
 > boundary.
+
+`THREAT-MODEL.md` is the catalog behind that statement: nine classes of published sandbox escape,
+one section each, with the mechanism, the advisories where it has broken a real project, and the
+corpus entries proving it is unreachable here. Every entry id in it is also a pytest node id, so
+any single claim runs with `pytest tests/test_corpus.py -k <id>`.
+
+One disclosure is deliberate and worth knowing about: **an error names the type of a value it
+could not work with**, so "cannot compare `Order` with `int`" tells an expression author a class
+name from your context. Never a value and never a `repr`, and a name is a string rather than a
+class object, so there is nothing to climb. It is the only thing about your data an error here
+gives up, and `THREAT-MODEL.md` records why the trade was taken.
+
+**A sandbox escape is always a critical bug here.** Not a hardening opportunity and not "working
+as designed for semi-trusted input". Every accepted escape ships as a new release rather than a
+silent push, with a CVE requested, the reporter credited, and a corpus entry added in the same
+change, so a hole that is fixed once stays fixed. Report one privately and never in a public
+issue: `SECURITY.md` has the contact and the process.
 
 ## Requirements
 
