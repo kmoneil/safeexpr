@@ -24,7 +24,7 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from safeexpr import EvaluationError, Evaluator, standard_registry
+from safeexpr import EvaluationError, Evaluator, FunctionError, standard_registry
 from safeexpr._regex import (
     _CACHE,
     _MAX_CACHE,
@@ -32,6 +32,7 @@ from safeexpr._regex import (
     _MAX_SUBJECT_LENGTH,
     _PARSER,
     _PARSER_NAME,
+    _compiled,
     check,
 )
 
@@ -569,6 +570,48 @@ class TestRegressions:
         over. Refusing it would have been a false positive on a pattern people really write."""
         assert check(r"(a)|(a)") is None
         assert check(r"((a)|(a))*$") is not None
+
+    def test_regression_regex_the_warning_branch_leaked_the_warning(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`raise failure from None`, in the one handler no corpus entry could reach.
+
+        `_compiled` guards `re.compile` against a warning the gate did not already refuse, and it
+        scrubbed with `raise ... from None`. That is the exact spelling `_errors` exists to warn
+        against: it clears `__cause__` and leaves `__context__` pointing at the warning. A
+        warning's `args` quote the pattern, and the pattern can come from the host's data, so the
+        object is reachable through an error that looks clean.
+
+        **Three things kept this hidden.** The gate refuses these patterns first on every measured
+        path, so the branch never runs end to end. `_eval._call` re-wraps a `FunctionError` into a
+        fresh error raised outside its own handler, so nothing leaked to a host. And the corpus
+        checks `__context__` per entry, so a branch no entry reaches is a branch it cannot check.
+        Depending on a downstream layer to scrub is what the decision record forbids, which is why
+        this is a defect rather than a tidy-up.
+
+        Reaching it needs the compile to warn where the parse did not, so `re.compile` is replaced
+        for the length of the call. `TestNoRaiseSiteScrubsInsideItsHandler` in
+        `test_error_boundary.py` is the check that does not need to reach a branch to see it.
+        """
+
+        class Secret:
+            api_key = "sk-live-REACHABLE-THROUGH-THE-WARNING"
+
+        def warns(pattern: str, *args: Any, **kwargs: Any) -> re.Pattern[str]:
+            raise FutureWarning("nested set is deprecated", Secret())
+
+        monkeypatch.setattr("safeexpr._regex.re.compile", warns)
+        _CACHE.clear()
+        with pytest.raises(FunctionError) as caught:
+            _compiled("abc")
+
+        assert caught.value.__cause__ is None
+        assert caught.value.__context__ is None, (
+            "the refusal carries the warning it caught, and the warning's args carry whatever "
+            "the host put in the pattern"
+        )
+        assert "warns about" in str(caught.value)
+        assert "abc" not in str(caught.value)
 
     def test_regression_regex_the_gate_runs_before_compilation(self) -> None:
         """A refused pattern must never reach `re.compile`, so a pattern that is both refused and

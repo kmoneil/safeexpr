@@ -321,18 +321,25 @@ def _compiled(pattern: str) -> re.Pattern[str]:
     except Warning:
         # The gate above catches this first in every case measured; kept because `check` parses
         # and this compiles, and the two are not obliged to warn about exactly the same things.
+        #
+        # **Built here and raised below, outside the handler.** This site used to say
+        # `raise failure from None`, which is the spelling `_errors` exists to warn against: it
+        # clears `__cause__` and leaves `__context__` pointing at the warning, whose `args` quote
+        # the pattern, and the pattern can come from the host's data. That is F9 for the fourth
+        # time in this package, and the first one no corpus entry could reach.
         failure = FunctionError(
             "this pattern is one the regular expression engine warns about, so it is refused "
             "rather than compiled"
         )
-        raise failure from None
-    if len(_CACHE) >= _MAX_CACHE:
-        # Dropped wholesale rather than by age. The pattern can come from the context and vary
-        # per row, so the cache has to be bounded; keeping the bookkeeping for an eviction order
-        # would cost more than the occasional rebuild it saves.
-        _CACHE.clear()
-    _CACHE[pattern] = built
-    return built
+    else:
+        if len(_CACHE) >= _MAX_CACHE:
+            # Dropped wholesale rather than by age. The pattern can come from the context and
+            # vary per row, so the cache has to be bounded; keeping the bookkeeping for an
+            # eviction order would cost more than the occasional rebuild it saves.
+            _CACHE.clear()
+        _CACHE[pattern] = built
+        return built
+    raise failure
 
 
 def _matches(value: Any, pattern: Any) -> bool:
