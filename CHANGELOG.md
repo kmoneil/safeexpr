@@ -120,6 +120,20 @@ in; the remaining function tiers and the evaluation budget are not.
   declared and not yet charged.
 - `FunctionError`, for a registry function to say what is wrong with the values it was given. It
   carries a message and nothing else, and the evaluator adds the position.
+- **A shadowed pipe is refused rather than answered silently.** `values | min` against a context
+  with its own `min` used to return the registry's answer with nothing said about the key it
+  passed over; it now raises `ReservedNameError` naming the key, before anything is evaluated.
+  - **Only the right of a `|`**, because that is the one position where the registry wins over
+    the data. A bare `min` reads the context as it always did, so
+    `metrics | where(_.value > min)` against `{"min": 10}` is correct and is not refused; with
+    forty-one functions registered, `min`, `max`, `first`, `last`, `sum`, `len` and `default` are
+    all realistic context keys and a blanket rule would break real expressions to prevent
+    nothing. It would also refuse `bitor(flags, first)`, which is the escape hatch the design
+    provides for exactly this.
+  - `ReservedNameError` sits beside `EvaluationError` rather than under it, because this is not
+    the expression author's mistake: the rule is correct and the expression is well-formed, and
+    only the host can rename the key.
+  - The reserved names are documented in the README as part of the language surface.
 - **`matches`, with a static gate against catastrophic backtracking.** Patterns are parsed with
   the standard library's own regex parser and refused *before* they compile if they nest one
   backtrackable repeat inside another, or repeat an alternation whose branches describe the same

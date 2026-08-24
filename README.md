@@ -40,6 +40,35 @@ rules.evaluate(
 because a registered name is reserved on the right of a `|`: with `first` registered,
 `flags | first` calls it whatever the context says `first` is.
 
+### Reserved names
+
+Registry membership is what tells the pipe transform that a `|` is a pipe rather than bitwise-or,
+and that decision never looks at your data, so an expression means the same thing whatever it is
+evaluated against. The price is that **a function name on the right of a `|` always wins**: with
+`first` registered, `flags | first` calls the function even if your context has a `first`.
+
+That collision is refused with a `ReservedNameError` naming the key, rather than quietly reading
+past it. Only the right of a `|` is affected. A bare `min` reads your data as it always did, so
+`metrics | where(_.value > min)` against `{"min": 10}` is correct and is not refused, and
+`first(x)` is unambiguous because a value from the context can never be called. `bitor(a, b)` is
+the way to say bitwise-or on a value that shares a function's name.
+
+The reserved names are exactly the registry's, so `Evaluator.function_names` is the list, and
+
+```python
+sorted(set(my_context) & rules.function_names)  # empty means no collisions
+```
+
+is the check to run at startup if you would rather know early. With `standard_registry()` they
+are:
+
+```
+all_ any_ bitor bool contains default ends_with extend first float format_date group_by int
+is_none join last len lower map matches max max_by merge min min_by parse_iso pluck replace
+slugify sort_by split starts_with str strip sum take unique_by upper url_host url_path url_query
+where
+```
+
 Every evaluation runs under a **step budget**: one counter, decremented per node evaluated,
 shared across nested evaluation, raising `BudgetExceededError` rather than running on. It is a
 counter and not a timer, so it needs no `signal`, no thread and no executor, gives the same

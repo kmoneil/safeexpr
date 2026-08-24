@@ -34,10 +34,16 @@ import operator
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, ClassVar
 
-from ._errors import BudgetExceededError, EvaluationError, SafeExprError, contained
+from ._errors import (
+    BudgetExceededError,
+    EvaluationError,
+    ReservedNameError,
+    SafeExprError,
+    contained,
+)
 from ._guards import MAX_RESULT_SIZE
 from ._parse import parse
-from ._pipes import transform
+from ._pipes import shadowed_pipes, transform
 from ._registry import Function, FunctionError, as_function, describe_type
 from ._validate import validate
 
@@ -319,14 +325,65 @@ class Evaluator:
             SafeExprError: For every failure. Nothing else escapes, which is what `contained`
                 is for.
         """
-        # Parse, rewrite pipes, validate, evaluate. The transform runs **before** validation so
-        # that the tree which is validated is the tree which is evaluated, with no window between
-        # the check and the use. It can only ever produce a call to a name already in the
-        # registry, using subtrees that were already there, so it cannot launder anything past the
-        # allowlist; and it preserves positions, so errors still point at what the user wrote.
-        tree = transform(parse(source), self._registry)
+        # Parse, check for a shadowed pipe, rewrite pipes, validate, evaluate. The transform runs
+        # **before** validation so that the tree which is validated is the tree which is
+        # evaluated, with no window between the check and the use. It can only ever produce a
+        # call to a name already in the registry, using subtrees that were already there, so it
+        # cannot launder anything past the allowlist; and it preserves positions, so errors still
+        # point at what the user wrote.
+        values = context or {}
+        tree = parse(source)
+        self._refuse_shadowed_pipes(tree, values, source)
+        tree = transform(tree, self._registry)
         validate(tree, source)
-        return self._run(tree, _Run(context or {}, source, self._budget))
+        return self._run(tree, _Run(values, source, self._budget))
+
+    def _refuse_shadowed_pipes(
+        self, tree: ast.Expression, context: Mapping[str, Any], source: str
+    ) -> None:
+        """Refuse a `|` whose right-hand name is both a function and a key in the data.
+
+        **Narrower than "reject any collision", and the difference is measured.** A bare name
+        reads the context, so `metrics | where(_.value > min)` against `{"min": 10}` is correct
+        and unambiguous; refusing it because `min` happens to be a function would break a
+        realistic rule to prevent nothing. A written `first(x)` is unambiguous too, because a
+        context value cannot be called at all. The right of a `|` is the one position where the
+        author might reasonably have meant the other thing, since without the registry that `|`
+        would be bitwise or.
+
+        Checked before the rewrite, because afterwards `x | first` and `first(x)` are the same
+        tree, and guarded by a set intersection so the common case costs one cheap operation
+        rather than a walk.
+
+        Args:
+            tree: The parsed expression, before the rewrite.
+            context: The names available to the expression.
+            source: The original source, for the error's position.
+
+        Raises:
+            ReservedNameError: On the first shadowed pipe, in source order.
+        """
+        if not context:
+            return
+        shadowed = self._registry.keys() & context.keys()
+        if not shadowed:
+            return
+        offenders = shadowed_pipes(tree, shadowed)
+        if not offenders:
+            return
+        # **Ordered and positioned by the right-hand name, not by the `BinOp`.** `x | first | last`
+        # parses as `(x | first) | last`, and both of those start at column zero, so sorting on
+        # the operator's own position is a tie that reports whichever the walk happened to find
+        # first. The colliding name is what differs between them, and it is also what the caret
+        # should be pointing at.
+        right = min(
+            (found.right for found in offenders),
+            key=lambda found: (found.lineno, found.col_offset),
+        )
+        name = right.id if isinstance(right, ast.Name) else right.func.id  # type: ignore[attr-defined]
+        raise ReservedNameError(
+            name, source=source, lineno=right.lineno, offset=right.col_offset + 1
+        )
 
     def _run(self, tree: ast.Expression, run: _Run) -> Any:
         return self._eval(tree.body, run)
