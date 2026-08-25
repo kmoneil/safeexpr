@@ -420,6 +420,37 @@ in; the remaining function tiers and the evaluation budget are not.
   the evaluator's `Mapping` for a counting probe, and the tuple's order is read off the source.
 
 ### Fixed
+- **A timing test flaked on macOS, and the cause was the reference rather than the thing being
+  measured.** `test_no_function_is_wildly_cheaper_to_the_counter_than_to_the_machine` held every
+  function to one ceiling of 25x the `map` reference per charged step. `pluck` sits at 17 to 22
+  depending on the machine, because it reads a key directly and walks no tree per item, so it
+  charges almost nothing for real work. It failed twice in one afternoon on `macos-latest`, both
+  times on code that had changed nothing.
+
+  The instability was in the **denominator**. Measured on both hosted runner platforms, eight
+  repeats each, `pluck` against `map`:
+
+  | Runner | 5 rounds | 15 rounds |
+  | --- | --- | --- |
+  | `ubuntu-latest` | 17.18 to 17.40 (spread 0.22) | 17.28 to 17.48 (spread 0.20) |
+  | `macos-latest` | 14.75 to **26.25** (spread 11.49) | 17.53 to 20.82 (spread 3.28) |
+
+  The macOS reference swings **52.6%** across its own minimums at five rounds against **1.4%** on
+  Linux, and a reference that happens to measure fast inflates every ratio above it. So five
+  samples is enough on one platform and not on the other, and the ratio inherits all of it.
+
+  `blind_spots` now takes **fifteen** samples rather than the five everything else takes, with the
+  argument recorded next to the constant. Taking a minimum is still right and taking more of them
+  is what was missing: more rounds move a minimum down and never up, so this converges rather than
+  drifting. It costs 0.27 s per call at 20,000 items.
+
+  **The ceilings are now per function and the general one is tighter than what it replaces.**
+  15x by default, against a worst observed 7.91x for `join` and under 2.6x for everything else, so
+  a function landing at 20x is caught where it used to pass. `pluck` carries its own 40x with the
+  measurement beside it, and a test asserts that exemption is still earned, so it cannot outlive
+  its reason. The class this exists to catch, the aggregates at 1,500 to 2,300x before calls were
+  charged for what they read, stays two orders of magnitude away.
+
 - **The shipped test suite did not pass from the shipped source distribution.**
   `tests/test_lanes.py` reads `.github/workflows/ci.yml` to assert every lane is wired into CI,
   and `.github/` is deliberately not in the sdist, because CI plumbing is not the product.

@@ -243,11 +243,40 @@ def observed_need(items: int = 100_000) -> dict[str, int]:
     }
 
 
-def blind_spots(items: int = 200_000) -> dict[str, float]:
+# **How many rounds `blind_spots` takes, and it is not the five everything else takes.**
+#
+# What that function reports is a *ratio* of two independent minimums, and the reference in the
+# denominator is the fragile half: a reference that happens to measure fast inflates every ratio
+# above it. Measured on two hosted runners, eight repeats each, `pluck` against `map`:
+#
+#     runner            rounds=5                    rounds=15
+#     ubuntu-latest     17.18 to 17.40  (0.22)      17.28 to 17.48  (0.20)
+#     macos-latest      14.75 to 26.25 (11.49)      17.53 to 20.82  (3.28)
+#
+# The macOS reference swings **52.6%** across its own minimums at five rounds and 26.4% at
+# fifteen; the Linux one swings 1.4%. So five rounds is enough on one platform and not on the
+# other, and the ratio inherits all of it. Fifteen costs 0.27 s per call at 20,000 items and 2.8 s
+# at 200,000, which is the price of a number that means the same thing on both.
+#
+# **Taking a minimum is still right and taking more of them is what was missing.** More rounds
+# move a minimum down, never up, so this converges rather than drifting.
+BLIND_SPOT_ROUNDS = 15
+
+
+def blind_spots(items: int = 200_000, rounds: int = BLIND_SPOT_ROUNDS) -> dict[str, float]:
     """Nanoseconds of wall time per charged step, per function.
 
     **The measurement that finds work the counter cannot see.** A number far above the reference
     means the budget is charging far too little for what the function actually does.
+
+    Args:
+        items: How large a collection to measure against.
+        rounds: Samples per case, minimum taken. Fifteen rather than the five everything else
+            takes, because this reports a ratio and the reference in its denominator is the
+            unstable half. See `BLIND_SPOT_ROUNDS`.
+
+    Returns:
+        Nanoseconds per charged step, per function.
     """
     context = {
         "nums": list(range(items)),
@@ -265,7 +294,7 @@ def blind_spots(items: int = 200_000) -> dict[str, float]:
         "sort_by": "nums | sort_by(_)",
     }
     return {
-        label: seconds_for(source, context) / steps_for(source, context) * 1e9
+        label: seconds_for(source, context, rounds=rounds) / steps_for(source, context) * 1e9
         for label, source in cases.items()
     }
 

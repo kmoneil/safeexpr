@@ -211,10 +211,18 @@ MAX_SOURCE_BYTES, MAX_EXPRESSION_DEPTH, MAX_DATA_NESTING, MAX_RESULT_SIZE
 
 Time per charged step is roughly constant across the collections tier, which is what makes the
 counter a proxy for time at all. `scripts/limits.py` prints the ratios so an outlier is visible
-rather than assumed, and two functions sit well above the reference: `join` at about six times
-and `pluck` at about fifteen. Both do real per-item work that costs more than a node evaluation,
-and both are bounded by the size of their input, so the budget still stops them. It stops them
-later than the ratio would suggest, which is what the measurement is for.
+rather than assumed, and two functions sit well above the reference: `join` at about **seven to
+eight times** and `pluck` at **eighteen to twenty-two**, the range being the difference between
+one machine and another rather than between one run and the next. Both do real per-item work that
+costs more than a node evaluation, and both are bounded by the size of their input, so the budget
+still stops them. It stops them later than the ratio would suggest, which is what the measurement
+is for.
+
+Those two ranges are wider than the rest of this page because a ratio inherits the noise of both
+halves, and the reference in the denominator is the fragile one: on one hosted runner its own
+minimum swings 52% between repeats where another swings 1%. The measurement therefore takes
+fifteen samples rather than the five everything else takes, which is enough to make the number
+mean the same thing on both.
 
 The other blind spot is named rather than hidden: an accepted regular expression runs inside `re`,
 where the counter cannot follow it. That is why `matches` costs ten steps rather than one, and why

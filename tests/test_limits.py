@@ -166,6 +166,27 @@ class TestStepsPerItemAreStableAcrossScales:
         assert at_scale * SCALE_FACTOR * HEADROOM <= DEFAULT_STEP_BUDGET
 
 
+# Time per charged step, as a multiple of the `map` reference, and the ceiling each is held to.
+#
+# **The default is 15x and it is tighter than the 25x it replaces.** Measured on both runner
+# platforms, fifteen rounds, eight repeats, worst observed: `join` 7.91x, `min` 2.52x, `max` 2.39x,
+# `unique_by` 1.87x, `sort_by` 1.62x, `sum` 1.69x. So 15 is roughly twice the worst thing the
+# default covers, and a new function landing at 20x is now caught where it used to pass.
+#
+# **`pluck` is the one exemption and it is a documented property rather than a concession.** It
+# reads a key directly and walks no tree per item, so it charges almost nothing for real work:
+# 18.48x worst on Linux, 21.67x worst on macOS. `docs/performance.md` says so in prose. 40x is
+# roughly twice that, which leaves the class this test exists to catch, the 1,500 to 2,300x
+# aggregates before calls were charged for what they read, two orders of magnitude away.
+BLIND_SPOT_CEILINGS = {"pluck": 40}
+DEFAULT_BLIND_SPOT_CEILING = 15
+
+
+def _ceiling(name: str) -> int:
+    """The multiple of the reference `name` is allowed to cost per charged step."""
+    return BLIND_SPOT_CEILINGS.get(name, DEFAULT_BLIND_SPOT_CEILING)
+
+
 class TestTheBudgetSeesWhatFunctionsActuallyDo:
     """Time per charged step, which is the only way to find work the counter cannot see.
 
@@ -178,11 +199,75 @@ class TestTheBudgetSeesWhatFunctionsActuallyDo:
     def test_no_function_is_wildly_cheaper_to_the_counter_than_to_the_machine(self) -> None:
         spots = limits.blind_spots(20_000)
         reference = spots["map (reference)"]
-        worst = max(spots.items(), key=lambda kv: kv[1])
-        assert worst[1] < reference * 25, (
-            f"{worst[0]} costs {worst[1] / reference:.0f}x the reference per charged step, which "
-            f"means the budget is not seeing what it does"
+        offenders = [
+            f"{name} at {value / reference:.1f}x (ceiling {_ceiling(name)}x)"
+            for name, value in spots.items()
+            if name != "map (reference)" and value >= reference * _ceiling(name)
+        ]
+        assert not offenders, (
+            f"the budget is not seeing what these do: {offenders}\n"
+            f"the whole table, as a multiple of the reference:\n"
+            + "\n".join(
+                f"    {name:<18} {value / reference:7.2f}x"
+                for name, value in sorted(spots.items(), key=lambda kv: -kv[1])
+            )
         )
+
+    def test_regression_limits_a_noisy_reference_inflated_the_ratio(self) -> None:
+        """The flake this battery exists in its current shape because of.
+
+        The assertion above was one cap of 25x over every function, and `pluck` sits at 17 to 22
+        depending on the platform. It failed twice in one afternoon on `macos-latest`, once on
+        `main`, both times on green code.
+
+        The cause was not `pluck`. It was the **reference in the denominator**: `map`'s minimum
+        swung 52.6% across eight runs on that runner against 1.4% on Linux, and a reference that
+        happens to measure fast inflates every ratio above it. Measured, `pluck` against `map`,
+        eight repeats:
+
+            runner            rounds=5                    rounds=15
+            ubuntu-latest     17.18 to 17.40  (0.22)      17.28 to 17.48  (0.20)
+            macos-latest      14.75 to 26.25 (11.49)      17.53 to 20.82  (3.28)
+
+        So the fix is in the estimator rather than in the number, and this asserts the estimator.
+        A future change that puts `blind_spots` back on the shared five-round default reopens the
+        flake, and nothing else here would notice: the ceilings would still pass on Linux.
+        """
+        source = (ROOT / "scripts" / "limits.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        function = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "blind_spots"
+        )
+        rounds = function.args.defaults[-1]
+        assert isinstance(rounds, ast.Name), (
+            "blind_spots no longer takes its round count from a named constant, so the argument "
+            "for why it differs from everything else has nowhere to live"
+        )
+        assert rounds.id == "BLIND_SPOT_ROUNDS"
+        assert limits.BLIND_SPOT_ROUNDS >= 15, (
+            f"blind_spots takes {limits.BLIND_SPOT_ROUNDS} rounds. Fifteen was chosen from a "
+            f"measured 11.49-point spread at five, on a runner this suite runs on."
+        )
+
+    def test_the_ceilings_are_still_earned(self) -> None:
+        """An exemption outliving its reason is how the next one gets waved through.
+
+        `pluck` has a ceiling of its own because it genuinely sits an order of magnitude above
+        everything else: it reads a key directly and walks no tree per item, so it charges almost
+        nothing for real work. If it ever comes back under the default, the exemption should go
+        rather than sit there making the general cap look looser than it is.
+        """
+        spots = limits.blind_spots(20_000)
+        reference = spots["map (reference)"]
+        for name in BLIND_SPOT_CEILINGS:
+            assert name in spots, f"{name} has a ceiling and is not measured any more"
+            ratio = spots[name] / reference
+            assert ratio > DEFAULT_BLIND_SPOT_CEILING * 0.5, (
+                f"{name} is at {ratio:.1f}x, comfortably under the "
+                f"{DEFAULT_BLIND_SPOT_CEILING}x default. Drop its exemption."
+            )
 
     def test_the_aggregates_are_within_a_small_factor(self) -> None:
         """`sum`, `min` and `max` were the worst offenders at 1,500 to 2,300 times, and are the
