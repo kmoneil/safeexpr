@@ -45,6 +45,9 @@
             "context": "sdist"
           },
           {
+            "context": "attribution"
+          },
+          {
             "context": "fast (ubuntu-latest)"
           },
           {

@@ -95,6 +95,35 @@ jobs:
       - run: uv run --no-project --python 3.13 python scripts/lanes.py sdist
 
   # ---------------------------------------------------------------------------
+  # The lane that does not live on somebody's laptop.
+  #
+  # A session link is a pointer to a private transcript and this repository is public. Six pull
+  # request bodies and all thirty-seven commits on `main` carried one before this existed, and
+  # removing them meant rewriting history through a protected branch.
+  #
+  # The two guards that were supposed to prevent it, a generator setting and a PreToolUse hook,
+  # both live in one developer's home directory. Neither is in this repository, neither travels
+  # with a clone, and neither runs for a commit made from a web session or another machine. This
+  # job is the one that reads what actually arrived, so it holds wherever the text came from.
+  #
+  # `fetch-depth: 0`, because the range is the merge base to the head and a shallow clone has
+  # neither end of it. No `uv sync`: the script is standard library only, deliberately, so this
+  # cannot be the lane that fails because an environment did not resolve.
+  # ---------------------------------------------------------------------------
+  attribution:
+    timeout-minutes: 5
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+      - run: uv python install
+      - run: uv run --no-project --python 3.13 python scripts/lanes.py attribution
+
+  # ---------------------------------------------------------------------------
   # The unit suite on the development interpreter, on both platforms.
   #
   # macOS is here rather than for completeness. This package's limits are measured in interpreter
