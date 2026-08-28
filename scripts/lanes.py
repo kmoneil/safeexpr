@@ -87,6 +87,23 @@ LANES: tuple[Lane, ...] = (
         command=("python", "scripts/check_sdist.py"),
     ),
     Lane(
+        name="attribution",
+        checks=(
+            "that nothing published from this repository carries tool attribution: no session "
+            "trailer or link on a commit in the range, and none in the pull request body"
+        ),
+        needs=(
+            "a checkout with history, which is why the job sets `fetch-depth: 0`: the range it "
+            "checks is the merge base to the head, and a shallow clone does not contain it. "
+            "**This is the only layer that is not somebody's local configuration.** The setting "
+            "that stops the text being generated and the hook that refuses to publish it both "
+            "live in one developer's home directory, so neither travels with a clone and neither "
+            "runs for a commit made from a web session or from another machine. Six pull request "
+            "bodies and every commit on `main` were published before this existed"
+        ),
+        command=("python", "scripts/check_attribution.py"),
+    ),
+    Lane(
         name="fast",
         checks=(
             "the unit suite on the development interpreter, including the tests a bare `pytest` "
