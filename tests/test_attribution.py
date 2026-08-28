@@ -26,6 +26,15 @@ import lanes  # noqa: E402
 
 SESSION = "https://claude.ai/code/session_01Esnm9mNDpqRWf4QAVHCwHo"
 
+# `tests/` ships in the sdist and `.git` does not, so the checks that ask git for a range have
+# nothing to read there. Skipped rather than made to pass, and the reason says what is missing:
+# a test that reads a file the distribution does not carry is the usual way this lane fails.
+# The `scan` tests below need no checkout and run everywhere, which is most of the file.
+needs_a_checkout = pytest.mark.skipif(
+    not (ROOT / ".git").exists(),
+    reason="no .git: this is a distribution, and a revision range needs a checkout",
+)
+
 
 @pytest.mark.parametrize(
     ("text", "form"),
@@ -73,6 +82,7 @@ def test_one_finding_per_line_not_one_per_form():
     assert len(findings) == 1
 
 
+@needs_a_checkout
 def test_the_body_is_checked_as_well_as_the_commits(tmp_path):
     """The six that leaked were bodies, not commit messages."""
     body = tmp_path / "body.md"
@@ -80,12 +90,14 @@ def test_the_body_is_checked_as_well_as_the_commits(tmp_path):
     assert _run("--range", "HEAD..HEAD", "--body-file", str(body)).returncode == 1
 
 
+@needs_a_checkout
 def test_an_empty_range_is_not_a_failure():
     """A pull request that only edits its own body has no commits, and must still pass."""
     finished = _run("--range", "HEAD..HEAD")
     assert finished.returncode == 0, finished.stderr
 
 
+@needs_a_checkout
 def test_the_event_payload_supplies_the_range_and_the_body(tmp_path, monkeypatch):
     """How it runs in CI: neither the range nor the body is passed on the command line."""
     payload = tmp_path / "event.json"
